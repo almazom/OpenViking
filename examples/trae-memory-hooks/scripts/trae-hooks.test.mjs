@@ -96,10 +96,13 @@ test("TRAE prompt hook injects recall and Stop captures dedicated event fields",
     let body = "";
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
-      if (request.url === "/api/v1/search/recall") {
-        response.end(JSON.stringify({ result: { rendered: "trae memory" } }));
+      if (request.url === "/api/v1/search/search" || request.url === "/api/v1/search/recall") {
+        response.end(JSON.stringify({
+          result: { rendered: "trae memory", entries: [], stats: {} },
+        }));
       } else if (request.url?.includes("/messages")) {
-        messages.push({ url: request.url, body: JSON.parse(body) });
+        const parsed = JSON.parse(body);
+        messages.push(...(parsed.messages ?? [parsed]).map((message) => ({ url: request.url, body: message })));
         response.end(JSON.stringify({ result: { ok: true } }));
       } else if (request.url?.endsWith("/commit")) {
         commits.push(request.url);

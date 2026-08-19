@@ -251,35 +251,6 @@ async def test_refresh_token_roundtrip(store):
 
 
 @pytest.mark.asyncio
-async def test_refresh_replay_revokes_chain(store):
-    """Reusing a consumed refresh must allow the caller to revoke the family."""
-    rt1 = "rt-1"
-    rt2 = "rt-2"
-    rt3 = "rt-3"
-    for rt in (rt1, rt2, rt3):
-        await store.insert_refresh(
-            token_plain=rt,
-            client_id="cx",
-            account_id="acct",
-            user_id="user",
-            role="user",
-            scope=None,
-            resource=None,
-            authorizing_key_fp=_FP,
-            ttl_seconds=86400,
-        )
-    # Consume rt1 (rotate to rt2). Then attacker replays rt1.
-    assert await store.consume_refresh(token_plain=rt1, replaced_by_plain=rt2) is not None
-    assert await store.consume_refresh(token_plain=rt1, replaced_by_plain=None) is None
-    # Detection — caller now revokes the chain.
-    revoked = await store.revoke_chain(client_id="cx", account_id="acct", user_id="user")
-    assert revoked >= 2  # rt2 and rt3 still active before revoke
-    # Both rt2 and rt3 must now be unusable.
-    assert await store.consume_refresh(token_plain=rt2, replaced_by_plain=None) is None
-    assert await store.consume_refresh(token_plain=rt3, replaced_by_plain=None) is None
-
-
-@pytest.mark.asyncio
 async def test_access_token_load_and_revoke(store):
     token = "at-secret"
     await store.insert_access(
@@ -366,16 +337,53 @@ async def test_revoke_user_tokens_cascades(store):
         ttl_seconds=3600,
     )
     await _insert_code(store, "code-alice", account_id="acct", user_id="alice")
+    alice_pending = await store.create_pending_authorization(
+        client_id="cx",
+        redirect_uri="https://example/cb",
+        redirect_uri_provided_explicitly=True,
+        code_challenge="chal",
+        scopes=None,
+        resource=None,
+        state=None,
+        display_code="ALICE-1",
+    )
+    assert await store.mark_pending_verified(
+        pending_id=alice_pending,
+        account_id="acct",
+        user_id="alice",
+        role="user",
+        verified_key_fp=_FP,
+    )
+    bob_pending = await store.create_pending_authorization(
+        client_id="cx",
+        redirect_uri="https://example/cb",
+        redirect_uri_provided_explicitly=True,
+        code_challenge="chal",
+        scopes=None,
+        resource=None,
+        state=None,
+        display_code="BOB-1",
+    )
+    assert await store.mark_pending_verified(
+        pending_id=bob_pending,
+        account_id="acct",
+        user_id="bob",
+        role="user",
+        verified_key_fp=_FP_OTHER,
+    )
 
     counts = await store.revoke_user_tokens(account_id="acct", user_id="alice")
     assert counts["access_tokens_revoked"] == 1
     assert counts["refresh_tokens_revoked"] == 1
     assert counts["codes_revoked"] == 1
+    assert counts["pending_authorizations_revoked"] == 1
 
     # Alice's everything dead, Bob's untouched.
     assert await store.load_access("at-1") is None
     assert await store.load_access("at-other") is not None
     assert await store.consume_auth_code("code-alice") is None
+    assert await store.load_pending_authorization(alice_pending) is None
+    assert await store.load_pending_authorization(bob_pending) is not None
 
 
 @pytest.mark.asyncio

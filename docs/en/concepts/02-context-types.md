@@ -44,7 +44,7 @@ results = client.find(
 
 ## Memory
 
-Memories are divided into user memories and Agent memories, representing learned knowledge about users and the world.
+Memories are durable knowledge learned from interactions and task execution. They are stored in the current User or Peer namespace, not in a separate `viking://agent/memories` directory.
 
 ### Characteristics
 
@@ -52,18 +52,23 @@ Memories are divided into user memories and Agent memories, representing learned
 - **Dynamic updates**: Continuously updated from interactions by Agent
 - **Personalized**: Learned for specific users and stable peers
 
-### 8 Categories
+### Built-in Memory Types
 
-| Category | Location | Description | Update Strategy |
-|----------|----------|-------------|-----------------|
-| **profile** | `user/memories/profile.md` | User basic info | ✅ Merge into one file |
-| **preferences** | `user/memories/preferences/` | User preferences by topic | ✅ Appendable |
-| **entities** | `user/memories/entities/` | Entity memories (people, projects) | ✅ Appendable |
-| **events** | `user/memories/events/` | Event records (decisions, milestones) | ❌ No update |
-| **trajectories** | `user/memories/trajectories/` | Reusable operation contracts | ❌ No update |
-| **experiences** | `user/memories/experiences/` | Reusable execution insights | ✅ Mergeable |
-| **tools** | `user/memories/tools/` | Tool usage knowledge and best practices | ✅ Mergeable |
-| **skills** | `user/memories/skills/` | Skill execution knowledge and workflow strategies | ✅ Mergeable |
+| Type | Default location | Description |
+|------|------------------|-------------|
+| **profile** | `user/memories/profile.md` | Basic user information |
+| **preferences** | `user/memories/preferences/` | User preferences organized by topic |
+| **entities** | `user/memories/entities/` | Knowledge about people, projects, organizations, and other entities |
+| **events** | `user/memories/events/` | Decisions, milestones, and other event records |
+| **identity** | `user/memories/identity.md` | Assistant name, persona, temperament, and self-introduction |
+| **soul** | `user/memories/soul.md` | Assistant principles, boundaries, style, and continuity |
+| **cases** | `user/memories/cases/` | Task cases used for training and evaluation |
+| **trajectories** | `user/memories/trajectories/` | Reusable task-execution trajectories |
+| **experiences** | `user/memories/experiences/` | Reusable experience distilled from execution outcomes |
+
+The `user/...` entries above are current-user short paths. The server resolves them to `viking://user/{user_id}/...`. When the memory policy permits Peer memory, supported types may instead be written under `viking://user/{user_id}/peers/{peer_id}/memories/...`. Applications can extend or adjust memory types with custom templates.
+
+The schema-defined `memories/tools/` and `memories/skills/` types are disabled. They are separate from standalone Skills stored under `viking://user/{user_id}/skills/{skill_name}/SKILL.md`, which remain supported.
 
 ### Usage
 
@@ -96,13 +101,15 @@ Skills are capabilities that Agents can invoke, belonging to the **AgentDefinedC
 ```
 viking://user/skills/{skill-name}/     # Default storage path
 ├── .abstract.md          # L0: Short description
-├── SKILL.md              # L1: Detailed overview
-└── scripts               # L2: Full definition
+├── .overview.md          # L1: Directory overview (after generation)
+├── SKILL.md              # L2: Skill definition
+└── scripts               # L2: Supporting implementation
 
 viking://agent/skills/{skill-name}/    # Override via --uri, public/shared (account global)
 ├── .abstract.md          # L0: Short description
-├── SKILL.md              # L1: Detailed overview
-└── scripts               # L2: Full definition
+├── .overview.md          # L1: Directory overview (after generation)
+├── SKILL.md              # L2: Skill definition
+└── scripts               # L2: Supporting implementation
 ```
 
 ### AgentDefinedContextType Subtypes

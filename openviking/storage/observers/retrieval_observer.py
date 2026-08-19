@@ -3,8 +3,7 @@
 """
 RetrievalObserver: Retrieval system observability tool.
 
-Provides methods to observe and report retrieval quality metrics
-accumulated by the HierarchicalRetriever.
+Provides retrieval diagnostics accumulated by the HierarchicalRetriever.
 """
 
 from openviking.storage.observers.base_observer import BaseObserver
@@ -17,12 +16,9 @@ class RetrievalObserver(BaseObserver):
     """
     RetrievalObserver: System observability tool for retrieval quality.
 
-    Reads accumulated statistics from the global RetrievalStatsCollector
-    and formats them for display via the observer API.
+    Empty retrievals are valid outcomes. Result counts and scores are
+    diagnostics only and do not determine component health.
     """
-
-    # A zero-result rate above this threshold is considered unhealthy.
-    UNHEALTHY_ZERO_RESULT_RATE = 0.5
 
     @staticmethod
     def _get_collector():
@@ -85,15 +81,9 @@ class RetrievalObserver(BaseObserver):
         return self.get_status_table()
 
     def is_healthy(self) -> bool:
-        """Retrieval is healthy when the zero-result rate is acceptable."""
-        stats = self._get_collector().snapshot()
-        if stats.total_queries == 0:
-            return True
-        return stats.zero_result_rate < self.UNHEALTHY_ZERO_RESULT_RATE
+        """Retrieval result diagnostics do not indicate component availability."""
+        return True
 
     def has_errors(self) -> bool:
-        """Errors are flagged when too many queries return zero results."""
-        stats = self._get_collector().snapshot()
-        if stats.total_queries < 5:
-            return False
-        return stats.zero_result_rate >= self.UNHEALTHY_ZERO_RESULT_RATE
+        """Empty retrieval results are valid outcomes, not errors."""
+        return False

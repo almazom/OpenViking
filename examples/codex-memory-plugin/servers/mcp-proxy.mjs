@@ -43,11 +43,13 @@ function readProxyConfig() {
   const effectivePeer = resolveEffectivePeerId({ cfg, cwd: process.cwd() });
   const mcpUrl = creds.mcpUrl || `${trimSlash(creds.baseUrl)}/mcp`;
   return {
+    baseUrl: trimSlash(creds.baseUrl),
     mcpUrl,
     apiKey: creds.apiKey || "",
     account: creds.account || "",
     user: creds.user || "",
     peerId: effectivePeer.peerId,
+    userAgent: cfg.userAgent || "",
     timeoutMs: Math.max(1000, Number(cfg.timeoutMs) || DEFAULT_TIMEOUT_MS),
     debug: cfg.debug === true,
     debugLogPath: cfg.debugLogPath,
@@ -66,5 +68,8 @@ function readProxyConfig() {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolvePath(process.argv[1])) {
-  createOpenVikingMcpProxy({ readConfig: readProxyConfig, loggerFactory: createLogger }).start();
+  createOpenVikingMcpProxy({
+    readConfig: readProxyConfig,
+    loggerFactory: createLogger,
+  }).start();
 }

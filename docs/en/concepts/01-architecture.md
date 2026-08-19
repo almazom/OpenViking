@@ -54,11 +54,11 @@ OpenViking is a context database designed for AI Agents, unifying all context ty
 | Module | Responsibility | Key Capabilities |
 |--------|----------------|------------------|
 | **Client** | Unified entry | Provides all operation interfaces, delegates to Service layer |
-| **Service** | Business logic | FSService, SearchService, SessionService, ResourceService, RelationService, PackService, DebugService |
+| **Service** | Business logic | FSService, SearchService, SessionService, ResourceService, PackService, DebugService |
 | **Retrieve** | Context retrieval | Intent analysis (IntentAnalyzer), hierarchical retrieval (HierarchicalRetriever), Rerank |
 | **Session** | Session management | Message recording, usage tracking, session compression, memory commit |
 | **Parse** | Context extraction | Document parsing (PDF/MD/HTML), tree building (TreeBuilder), async semantic generation |
-| **Compressor** | Memory compression | 8-category memory extraction, LLM deduplication decisions |
+| **Compressor** | Memory compression | Schema-driven memory extraction and LLM deduplication decisions |
 | **Storage** | Storage layer | VikingFS virtual filesystem, vector index, AGFS integration |
 
 ## Service Layer
@@ -71,7 +71,6 @@ The Service layer decouples business logic from the transport layer, enabling re
 | **SearchService** | Semantic search | search, find |
 | **SessionService** | Session management | session, sessions, commit, delete |
 | **ResourceService** | Resource import | add_resource, add_skill, wait_processed |
-| **RelationService** | Relation management | relations, link, unlink |
 | **PackService** | Import/export and backup/restore | export_ovpack, import_ovpack, backup_ovpack, restore_ovpack |
 | **DebugService** | Debug service | observer (ObserverService) |
 
@@ -81,7 +80,7 @@ OpenViking uses a dual-layer storage architecture separating content from index 
 
 | Layer | Responsibility | Content |
 |-------|----------------|---------|
-| **AGFS** | Content storage | L0/L1/L2 full content, multimedia files, relations |
+| **AGFS** | Content storage | L0/L1/L2 full content, multimedia files |
 | **Vector Index** | Index storage | URIs, vectors, metadata (no file content) |
 
 ## Data Flow Overview
@@ -117,22 +116,10 @@ Messages → Compress → Archive → Memory Extraction → Storage
 1. **Messages**: Accumulate conversation messages and usage records
 2. **Compress**: Keep recent N rounds, archive older messages
 3. **Archive**: Generate L0/L1 for history segments
-4. **Memory Extraction**: Extract 8-category memories from messages
+4. **Memory Extraction**: Extract memories from messages according to the memory policy and MemoryType schemas
 5. **Storage**: Write to AGFS + vector index
 
-## Deployment Modes
-
-### Embedded Mode
-
-For local development and single-process applications:
-
-```python
-client = OpenViking(path="./data")
-```
-
-- Auto-starts AGFS subprocess
-- Uses local vector index
-- Singleton pattern
+## Deployment Mode
 
 ### HTTP Mode
 

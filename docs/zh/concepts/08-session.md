@@ -143,18 +143,13 @@ commit() 分两阶段执行：
 
 ## 记忆提取
 
-### 8 种分类
+### 记忆类型
 
-| 分类 | 归属 | 说明 | 可合并 |
-|------|------|------|--------|
-| **profile** | user | 用户身份/属性 | ✅ |
-| **preferences** | user | 用户偏好 | ✅ |
-| **entities** | user | 实体（人/项目） | ✅ |
-| **events** | user | 事件/决策 | ❌ |
-| **cases** | agent | 问题+解决方案 | ❌ |
-| **patterns** | agent | 可复用流程 | ✅ |
-| **tools** | agent | 工具使用经验与最佳实践 | ✅ |
-| **skills** | agent | 技能执行经验与工作流策略 | ✅ |
+提交会话后，OpenViking 会根据对话内容和当前记忆策略，提取对后续交互有价值的信息，并保存到当前用户的记忆空间。当对话涉及稳定的 Peer 时，相关记忆也可以保存到对应的 Peer 空间。
+
+OpenViking 内置 `profile`、`preferences`、`entities`、`events`、`identity`、`soul`、`cases`、`trajectories` 和 `experiences` 等记忆类型，也支持根据业务需要自定义。完整用途与路径见 [上下文类型](./02-context-types.md)。
+
+在 `memory_policy.memory_types` 中，`experiences` 会启用完整的 Agent Evolution 流程，并自动激活 `cases` 和 `trajectories`。如果没有 `experiences`，显式传入的 `cases` 和 `trajectories` 会被静默忽略，不会报错。
 
 ### 提取流程
 
@@ -248,16 +243,15 @@ viking://user/{user_id}/sessions/{session_id}/
     └── {tool_id}/tool.json
 
 viking://user/memories/
-├── profile.md                # 追加式用户画像
+├── profile.md
+├── identity.md
+├── soul.md
 ├── preferences/
 ├── entities/
-└── events/
-
-viking://user/memories/
+├── events/
 ├── cases/
-├── patterns/
-├── tools/
-└── skills/
+├── trajectories/
+└── experiences/
 ```
 
 `viking://user/sessions/{session_id}` 是相对当前请求用户的短路径，服务端会将其

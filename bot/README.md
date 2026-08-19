@@ -105,13 +105,14 @@ Edit `~/.openviking/ov.conf`:
     "agents": {
       "provider": "openai",
       "model": "gpt-4o-mini",
-      "api_key": "<your-model-api-key>"
+      "api_key": "<your-model-api-key>",
+      "max_tokens": 8192
     }
   }
 }
 ```
 
-Alternatively, configure only the root-level `vlm` section. VikingBot inherits its model, provider, API key, API base, and timeout settings.
+Alternatively, configure only the root-level `vlm` section. VikingBot inherits its model, provider, API key, API base, timeout, and output-token settings. `bot.agents.max_tokens` is optional; when omitted, VikingBot lets the model provider choose the output limit. A `max_tokens` value on an individual credential overrides the Agent-level value.
 
 #### 2. Start chatting
 
@@ -313,6 +314,7 @@ Restart `vikingbot gateway` after changing the configuration.
 | `bot.gateway.port` | `18790` | Gateway listen port |
 | `bot.sandbox.backend` | `direct` | Execution backend |
 | `bot.sandbox.mode` | `shared` | Workspace isolation mode |
+| `bot.sandbox.backends.direct.allow_compile_exec` | `false` | Unsafe opt-in that adds `exec` to Compile when using the `direct` backend; ordinary Compile tasks still run without it |
 | `bot.heartbeat.enabled` | `true` | Whether to check `HEARTBEAT.md` periodically |
 | `bot.heartbeat.interval_seconds` | `600` | Heartbeat interval |
 | `bot.mode` | `normal` | One of `normal`, `readonly`, or `debug` |
@@ -328,6 +330,67 @@ Restart `vikingbot gateway` after changing the configuration.
 | `bot.ov_server.exp_recall_limit` | `5` | Number of Experiences recalled |
 | `bot.ov_server.exp_recall_max_chars` | `10000` | Character budget for injected Experiences |
 | `bot.ov_server.exp_write_tools` | `write_file`,`edit_file` | Tools that trigger experience recall before writes |
+
+## Workspace and Agent Customization
+
+The Workspace is VikingBot's local working directory. It contains Agent bootstrap instructions, Skills, Heartbeat tasks, and files used by file and Shell tools. The OpenViking workspace is accessed through `openviking_*` tools for Resources, Memories, and Skills; it is not the same local directory.
+
+### Find the Active Workspace
+
+The Workspace root is derived from `storage.workspace`:
+
+```text
+<storage.workspace>/bot/workspace
+```
+
+When `storage.workspace` is omitted, the default is `~/.openviking/data/bot/workspace`. Check the resolved path with:
+
+```bash
+vikingbot status
+```
+
+The active directory used by the Agent also depends on `bot.sandbox.mode`:
+
+| Mode | Active Workspace |
+|------|------------------|
+| `shared` (default) | `<workspace>/shared` |
+| `per-session` | `<workspace>/<session-key>` |
+| `per-channel` | `<workspace>/<channel-key>` |
+
+For example, with the default configuration, edit `~/.openviking/data/bot/workspace/shared/SOUL.md`.
+
+### Customize the Agent
+
+When an active Workspace is first used, VikingBot copies initial files from the built-in `bot/workspace` template. The main customization points are:
+
+| File or directory | Purpose | How it is loaded |
+|-------------------|---------|------------------|
+| `SOUL.md` | Personality, values, and communication style | Added to the system prompt on every turn |
+| `AGENTS.md` | Global working rules and task constraints; create it when needed | Added to the system prompt on every turn |
+| `IDENTITY.md` | Agent name, role, and identity background; create it when needed | Added to the system prompt on every turn |
+| `TOOLS.md` | Tool selection, execution boundaries, and safety rules | Added to the system prompt on every turn |
+| `skills/<name>/SKILL.md` | Workflows and supporting resources for a class of tasks | A summary is injected first; full instructions are loaded progressively |
+| `HEARTBEAT.md` | Tasks checked periodically | Read only by Heartbeat |
+
+For example, edit `SOUL.md` in the active Workspace:
+
+```markdown
+# Soul
+
+You are the team's engineering assistant.
+
+- Lead with the conclusion, then add only necessary detail
+- Inspect the current state before changing code
+- Run relevant verification after making a change
+- State assumptions clearly and never invent results
+```
+
+Saved changes normally take effect on the next Agent turn without restarting the Gateway. `SOUL.md` changes prompt behavior only; it cannot bypass Channel permissions, tool visibility, or Sandbox restrictions.
+
+> [!NOTE]
+> Edit files in the active Workspace. `bot/workspace` in the repository or installed package is an initialization template and does not overwrite an existing Workspace. Never store API Keys or other secrets in bootstrap files.
+
+For the complete loading order, file responsibilities, and customization boundaries, see [Agent Capabilities](docs/en/concepts/02-agent-capabilities.md#workspace-and-agent-customization).
 
 ## Agent Tools
 

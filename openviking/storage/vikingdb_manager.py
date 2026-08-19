@@ -4,14 +4,19 @@
 VikingDB Manager class that extends VikingVectorIndexBackend with queue management functionality.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Tuple
 
 from openviking.server.identity import RequestContext
 from openviking.storage.expr import FilterExpr
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.storage.queuefs.embedding_queue import EmbeddingQueue
 from openviking.storage.queuefs.queue_manager import QueueManager
-from openviking.storage.viking_vector_index_backend import VikingVectorIndexBackend
+from openviking.storage.viking_vector_index_backend import (
+    UpsertOptions,
+    VikingVectorIndexBackend,
+    normalize_upsert_options,
+)
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config.vectordb_config import VectorDBBackendConfig
 
@@ -183,7 +188,7 @@ class VikingDBManagerProxy:
         proxy = VikingDBManagerProxy(manager, ctx)
 
         # 使用（无需传 ctx；仅在需要保留未显式传入字段时开启 partial_update）
-        await proxy.upsert(data, partial_update=True)
+        await proxy.upsert(data, options=UpsertOptions(partial_update=True))
         ```
     """
 
@@ -285,14 +290,33 @@ class VikingDBManagerProxy:
     # 数据操作 API（自动携带 ctx）
     # =========================================================================
 
-    async def upsert(self, data: Dict[str, Any], partial_update: bool = False):
+    async def upsert(
+        self,
+        data: Dict[str, Any],
+        options: UpsertOptions | Mapping[str, Any] | None = None,
+    ):
         """Bound write entrypoint.
 
-        ``partial_update=False`` keeps the legacy full-record upsert semantics.
-        ``partial_update=True`` reads the current record first and preserves
+        ``options.partial_update=False`` keeps the legacy full-record upsert semantics.
+        ``options.partial_update=True`` reads the current record first and preserves
         fields that are omitted from ``data`` before writing.
         """
-        return await self._manager.upsert(data, ctx=self._ctx, partial_update=partial_update)
+        options = normalize_upsert_options(options)
+        return await self._manager.upsert(
+            data,
+            ctx=self._ctx,
+            options=options,
+        )
+
+    async def upsert_many(self, data_list: List[Dict[str, Any]]) -> List[str]:
+        """Bulk full-record upsert with the proxy's bound request context."""
+        return await self._manager.upsert_many(data_list, ctx=self._ctx)
+
+    @asynccontextmanager
+    async def bulk_ingest(self) -> AsyncIterator[None]:
+        """Bind the proxy context to a bulk-ingest maintenance scope."""
+        async with self._manager.bulk_ingest(ctx=self._ctx):
+            yield
 
     async def get(self, ids: List[str]) -> List[Dict[str, Any]]:
         return await self._manager.get(ids, ctx=self._ctx)

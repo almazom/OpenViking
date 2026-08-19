@@ -26,11 +26,18 @@ Moving away from traditional flat database thinking, all context is organized as
 viking://
 ├── resources/              # Resources: project docs, code repos, web pages
 │   └── my_project/
-├── user/                   # User: preferences, habits
-│   └── memories/
-└── agent/                  # Agent: skills, instructions, task memories
-    ├── skills/
-    └── memories/
+├── user/
+│   └── {user_id}/          # Private context for the current user
+│       ├── memories/       # User memories
+│       ├── resources/      # Private user resources
+│       ├── skills/         # Private user skills (default)
+│       ├── peers/
+│       │   └── {peer_id}/
+│       │       ├── memories/
+│       │       └── resources/
+│       └── sessions/
+└── agent/
+    └── skills/             # Optional account-wide shared skills
 ```
 
 **Three Context Types**:
@@ -55,22 +62,24 @@ client.overview("viking://...")          # Get L1 overview
 
 Stuffing massive context into prompts all at once is not only expensive but also risks exceeding model windows and introducing noise. OpenViking automatically processes context into three levels upon ingestion:
 
-| Level | Name | Token Limit | Purpose |
-|-------|------|-------------|---------|
-| **L0** | Abstract | ~100 tokens | Vector search, quick filtering |
-| **L1** | Overview | ~2k tokens | Rerank, content navigation |
-| **L2** | Detail | Unlimited | Full content, on-demand loading |
+| Level | Name | Default body limit | Purpose |
+| --- | --- | --- | --- |
+| **L0** | Abstract | 256 characters | Vector search, quick filtering |
+| **L1** | Overview | 4000 characters | Rerank, content navigation |
+| **L2** | Detail | No uniform limit | Full content, on-demand loading |
 
 ```
 viking://resources/my_project/
 ├── .abstract.md               # L0 layer: abstract
 ├── .overview.md               # L1 layer: overview
 ├── docs/
-│   ├── .abstract.md          # Each directory has L0/L1 layers
+│   ├── .abstract.md          # Semantically processed directories commonly have L0/L1
 │   ├── .overview.md
 │   └── api.md                # L2 layer: full content
 └── src/
 ```
+
+L0/L1 are directory sidecars, not per-file sidecars, and they are not guaranteed to coexist. See [Context Layers](../concepts/03-context-layers.md).
 
 ### 3. Directory Recursive Retrieval
 
@@ -92,18 +101,17 @@ The retrieval process uses directory recursive strategy, with complete traces of
 
 ### 5. Automatic Session Management
 
-OpenViking has built-in memory self-iteration loops. At the end of each session, developers can trigger memory extraction, and the system asynchronously analyzes task execution results and user feedback, automatically updating User and Agent memory directories.
+OpenViking includes a memory self-iteration loop. After a session is committed, the system asynchronously analyzes task outcomes and user feedback, then updates memory for the current user or Peer according to the active memory policy.
 
-**6 Memory Categories**:
+**Built-in memory types**:
 
-| Category | Owner | Description |
-|----------|-------|-------------|
-| **profile** | user | User basic information |
-| **preferences** | user | User preferences by topic |
-| **entities** | user | Entity memories (people, projects) |
-| **events** | user | Event records (decisions, milestones) |
-| **cases** | agent | Learned cases |
-| **patterns** | agent | Learned patterns |
+| Purpose | Built-in types | Description |
+|---------|----------------|-------------|
+| **User and environment understanding** | `profile`, `preferences`, `entities`, `events` | User profile, preferences, entities, and events |
+| **Assistant identity and continuity** | `identity`, `soul` | Assistant identity, boundaries, style, and continuity |
+| **Task execution and learning** | `cases`, `trajectories`, `experiences`, `tools`, `skills` | Trainable cases, execution traces, reusable experience, and tool/skill usage knowledge |
+
+OpenViking lets applications extend or adjust memory types for their own needs.
 
 Enabling Agents to become "smarter with use" through world interaction, achieving self-evolution.
 

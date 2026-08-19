@@ -26,11 +26,18 @@ OpenViking 正是为解决这些痛点而设计的上下文数据库。
 viking://
 ├── resources/              # 资源：项目文档、代码库、网页等
 │   └── my_project/
-├── user/                   # 用户：个人偏好、习惯等
-│   └── memories/
-└── agent/                  # Agent：技能、指令、任务记忆等
-    ├── skills/
-    └── memories/
+├── user/
+│   └── {user_id}/          # 当前用户的私有上下文
+│       ├── memories/       # 用户记忆
+│       ├── resources/      # 用户私有资源
+│       ├── skills/         # 用户私有技能（默认）
+│       ├── peers/
+│       │   └── {peer_id}/
+│       │       ├── memories/
+│       │       └── resources/
+│       └── sessions/
+└── agent/
+    └── skills/             # account 全局共享技能（可选）
 ```
 
 **三种上下文类型**：
@@ -55,22 +62,24 @@ client.overview("viking://...")       # 获取 L1 概览
 
 将海量上下文一次性塞入提示词，不仅成本高昂，更容易超出模型窗口并引入噪声。OpenViking 在上下文写入时便自动将其处理为三个层级：
 
-| 层级 | 名称 | Token 限制 | 用途 |
-|------|------|-----------|------|
-| **L0** | 摘要 | ~100 tokens | 向量搜索、快速过滤 |
-| **L1** | 概览 | ~2k tokens | Rerank 精排、内容导航 |
-| **L2** | 详情 | 无限制 | 完整内容、按需加载 |
+| 层级 | 名称 | 默认正文上限 | 用途 |
+| --- | --- | --- | --- |
+| **L0** | 摘要 | 256 字符 | 向量搜索、快速过滤 |
+| **L1** | 概览 | 4000 字符 | Rerank 精排、内容导航 |
+| **L2** | 详情 | 无统一上限 | 完整内容、按需加载 |
 
 ```
 viking://resources/my_project/
 ├── .abstract.md               # L0 层：摘要
 ├── .overview.md               # L1 层：概览
 ├── docs/
-│   ├── .abstract.md          # 每个目录都有对应的 L0/L1 层
+│   ├── .abstract.md          # 语义处理目录通常包含 L0/L1
 │   ├── .overview.md
 │   └── api.md                # L2 层：完整内容
 └── src/
 ```
+
+L0/L1 是目录级 sidecar，不是 per-file sidecar；两者也不保证始终同时存在。详见[上下文层级](../concepts/03-context-layers.md)。
 
 ### 3. 目录递归检索
 
@@ -92,18 +101,17 @@ OpenViking 的组织方式采用层次化虚拟文件系统结构，所有上下
 
 ### 5. 会话自动管理
 
-OpenViking 内置了记忆自迭代闭环。在每次会话结束时，开发者可以主动触发记忆提取机制，系统会异步分析任务执行结果与用户反馈，并自动更新至 User 和 Agent 的记忆目录下。
+OpenViking 内置记忆自迭代闭环。提交会话后，系统会异步分析任务执行结果与用户反馈，并根据记忆策略更新当前用户或 Peer 的记忆。
 
-**6 种记忆分类**：
+**内置记忆类型**：
 
-| 分类 | 归属 | 说明 |
-|------|------|------|
-| **profile** | user | 用户基本信息 |
-| **preferences** | user | 按主题的用户偏好 |
-| **entities** | user | 实体记忆（人物、项目） |
-| **events** | user | 事件记录（决策、里程碑） |
-| **cases** | agent | 学习的案例 |
-| **patterns** | agent | 学习的模式 |
+| 用途 | 内置类型 | 说明 |
+|------|----------|------|
+| **用户与环境理解** | `profile`、`preferences`、`entities`、`events` | 记录用户画像、偏好、实体和事件 |
+| **助手身份与连续性** | `identity`、`soul` | 记录助手身份、边界、风格和连续性 |
+| **任务执行与学习** | `cases`、`trajectories`、`experiences`、`tools`、`skills` | 沉淀可训练案例、执行轨迹、经验和工具/技能使用知识 |
+
+OpenViking 支持根据业务需要扩展或调整记忆类型。
 
 让 Agent 在与世界的交互中"越用越聪明"，实现自我进化。
 

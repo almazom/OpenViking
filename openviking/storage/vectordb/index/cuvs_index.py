@@ -20,21 +20,43 @@ import json
 import logging
 import math
 import re
+import struct
 import threading
 import time
 import traceback
+from array import array
 from collections import OrderedDict
+from concurrent.futures import Future
 from contextlib import nullcontext
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from dataclasses import dataclass, field
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    overload,
+)
 
 from openviking.storage.vectordb.store.data import CandidateData, DeltaRecord
 
 logger = logging.getLogger(__name__)
 
+_FP32_BYTES = 4
+_U32_BYTES = 4
+_FP32_UPLOAD_BATCH_BYTES = 64 * 1024 * 1024
+
+NativeFilterWords = Union[Sequence[int], bytes]
+StoredNativeFilterWords = Union[Tuple[int, ...], bytes]
 NativeFilterEvaluation = Union[
-    Tuple[Sequence[int], int],
-    Tuple[Sequence[int], int, int],
+    Tuple[NativeFilterWords, int],
+    Tuple[NativeFilterWords, int, int],
 ]
 NativeFilterResolver = Callable[[Mapping[str, Any]], NativeFilterEvaluation]
 
@@ -53,6 +75,10 @@ class CuVSNativeRouteError(RuntimeError):
 
 class UnsupportedCuVSFilterError(ValueError):
     """Raised when a filter cannot be translated to a cuVS prefilter."""
+
+
+class _StalePreparedFilter(RuntimeError):
+    """Internal retry signal for a host filter invalidated before admission."""
 
 
 @dataclass(frozen=True)
@@ -74,9 +100,14 @@ class CuVSSearchTelemetry:
     auto_mode: bool
     dtype: str = "float32"
     max_concurrent_gpu_searches: int = 1
+    micro_batching_enabled: bool = False
+    micro_batching_warm_fast_path: bool = False
+    batch_size: int = 1
     route_reason: str = "pending"
     filter_kind: str = "none"
     filter_cache_hit: bool = False
+    filter_cache_eviction_fallback: bool = False
+    filter_words_packed: bool = False
     native_filter_reused: bool = False
     build_performed: bool = False
     eligible_count: Optional[int] = None
@@ -88,9 +119,11 @@ class CuVSSearchTelemetry:
     total_ms: float = 0.0
     preflight_ms: float = 0.0
     queue_ms: float = 0.0
+    gpu_gate_queue_ms: float = 0.0
     build_ms: float = 0.0
     filter_prepare_ms: float = 0.0
     gpu_search_ms: float = 0.0
+    batch_wait_ms: float = 0.0
     native_search_ms: float = 0.0
 
     def as_dict(self) -> Dict[str, Any]:
@@ -99,9 +132,14 @@ class CuVSSearchTelemetry:
             "auto_mode": self.auto_mode,
             "dtype": self.dtype,
             "max_concurrent_gpu_searches": self.max_concurrent_gpu_searches,
+            "micro_batching_enabled": self.micro_batching_enabled,
+            "micro_batching_warm_fast_path": self.micro_batching_warm_fast_path,
+            "batch_size": self.batch_size,
             "route_reason": self.route_reason,
             "filter_kind": self.filter_kind,
             "filter_cache_hit": self.filter_cache_hit,
+            "filter_cache_eviction_fallback": self.filter_cache_eviction_fallback,
+            "filter_words_packed": self.filter_words_packed,
             "native_filter_reused": self.native_filter_reused,
             "build_performed": self.build_performed,
             "eligible_count": self.eligible_count,
@@ -113,9 +151,11 @@ class CuVSSearchTelemetry:
             "total_ms": round(self.total_ms, 3),
             "preflight_ms": round(self.preflight_ms, 3),
             "queue_ms": round(self.queue_ms, 3),
+            "gpu_gate_queue_ms": round(self.gpu_gate_queue_ms, 3),
             "build_ms": round(self.build_ms, 3),
             "filter_prepare_ms": round(self.filter_prepare_ms, 3),
             "gpu_search_ms": round(self.gpu_search_ms, 3),
+            "batch_wait_ms": round(self.batch_wait_ms, 3),
             "native_search_ms": round(self.native_search_ms, 3),
         }
 
@@ -355,6 +395,60 @@ def matches_filter(
     raise UnsupportedCuVSFilterError(f"Unsupported cuVS filter operation: {op!r}")
 
 
+@dataclass(frozen=True)
+class _PackedFP32Rows(Sequence[Sequence[float]]):
+    """Immutable FP32 rows captured for one cuVS rebuild.
+
+    The row blobs keep mutation snapshots cheap and safe: an upsert replaces a
+    blob instead of modifying storage which a background rebuild may still be
+    reading.  Runtime uploads concatenate only a bounded number of rows at a
+    time, so a rebuild does not require another full host-side dataset copy.
+    """
+
+    rows: Tuple[bytes, ...]
+    dimension: int
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    @overload
+    def __getitem__(self, index: int) -> Sequence[float]: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[Sequence[float]]: ...
+
+    def __getitem__(
+        self, index: Union[int, slice]
+    ) -> Union[Sequence[float], Sequence[Sequence[float]]]:
+        if isinstance(index, slice):
+            return tuple(memoryview(row).cast("f") for row in self.rows[index])
+        return memoryview(self.rows[index]).cast("f")
+
+    def __iter__(self) -> Iterator[Sequence[float]]:
+        for row in self.rows:
+            yield memoryview(row).cast("f")
+
+    @property
+    def nbytes(self) -> int:
+        return len(self.rows) * self.dimension * _FP32_BYTES
+
+    def iter_packed_batches(
+        self,
+        max_bytes: int,
+    ) -> Iterator[Tuple[int, int, bytes]]:
+        """Yield row-aligned host buffers bounded by ``max_bytes`` when possible."""
+
+        if max_bytes <= 0:
+            raise ValueError("cuVS FP32 upload batch size must be positive")
+        row_bytes = self.dimension * _FP32_BYTES
+        if row_bytes <= 0:
+            return
+        rows_per_batch = max(1, max_bytes // row_bytes)
+        for start in range(0, len(self.rows), rows_per_batch):
+            end = min(start + rows_per_batch, len(self.rows))
+            yield start, end, b"".join(self.rows[start:end])
+
+
 class _CuVSRuntime:
     """Small adapter around the public cuVS Python API."""
 
@@ -401,13 +495,11 @@ class _CuVSRuntime:
         self._owned_resources: List[Any] = []
         self._resource_limit = 1
         self._resources_closed = False
-        self._use_explicit_resources = False
 
     def set_max_concurrent_searches(self, value: int) -> None:
         limit = max(1, int(value))
         with self._resource_condition:
             self._resource_limit = limit
-            self._use_explicit_resources = limit > 1
             self._resource_condition.notify_all()
 
     def device_scope(self):
@@ -442,9 +534,36 @@ class _CuVSRuntime:
     def build(self, dataset: Sequence[Sequence[float]]):
         with self.device_scope():
             device_dataset = None
+            packed_batch = None
+            host_batch = None
             index = None
             try:
-                device_dataset = self.cp.asarray(dataset, dtype=self.device_dtype)
+                if isinstance(dataset, _PackedFP32Rows):
+                    # CuPy already depends on NumPy, but keep the import on the
+                    # GPU-only path so native OpenViking users do not gain a
+                    # new import-time dependency through this module.
+                    import numpy as np
+
+                    device_dataset = self.cp.empty(
+                        (len(dataset), dataset.dimension),
+                        dtype=self.device_dtype,
+                    )
+                    for start, end, packed_batch in dataset.iter_packed_batches(
+                        _FP32_UPLOAD_BATCH_BYTES
+                    ):
+                        host_batch = np.frombuffer(packed_batch, dtype=np.float32).reshape(
+                            end - start, dataset.dimension
+                        )
+                        if self.dtype == "float16":
+                            host_batch = host_batch.astype(np.float16)
+                        # ndarray.set() without an explicit stream performs a
+                        # synchronous host-to-device copy.  The bounded host
+                        # buffer can therefore be released before the next batch.
+                        device_dataset[start:end].set(host_batch)
+                        host_batch = None
+                        packed_batch = None
+                else:
+                    device_dataset = self.cp.asarray(dataset, dtype=self.device_dtype)
                 if self.algorithm == "brute_force":
                     index = self.brute_force.build(device_dataset, metric=self.metric)
                     return _CuVSRuntimeIndex(index=index, dataset=device_dataset)
@@ -456,6 +575,8 @@ class _CuVSRuntime:
                 # Drop them before Device.__exit__ restores the caller's device.
                 index = None
                 device_dataset = None
+                host_batch = None
+                packed_batch = None
                 # Python/Cython exception frames can retain CUDA arguments even
                 # after the locals above are cleared. Preserve stack locations
                 # while releasing frame locals under the captured device.
@@ -504,10 +625,33 @@ class _CuVSRuntime:
                     words[index // 32] |= 1 << (index % 32)
             return self.cp.asarray(words, dtype=self.cp.uint32)
 
-    def prepare_filter_words(self, words: Sequence[int]):
+    def prepare_filter_words(self, words: NativeFilterWords):
         """Copy an already packed native filter bitmap to the device."""
 
+        if isinstance(words, bytes) and len(words) % _U32_BYTES != 0:
+            raise ValueError("Packed native filter bitmap length must be a multiple of 4 bytes")
         with self.device_scope():
+            if isinstance(words, bytes):
+                # Keep NumPy on the GPU-only path. The explicit little-endian
+                # dtype matches the additive native ABI without constructing a
+                # Python int for every bitmap word.
+                import numpy as np
+
+                host_words = np.frombuffer(words, dtype="<u4")
+                device_words = None
+                try:
+                    device_words = self.cp.empty(host_words.shape, dtype=self.cp.uint32)
+                    # ndarray.set() without an explicit stream completes the host
+                    # copy before the immutable bytes owner can leave the cache.
+                    device_words.set(host_words)
+                    return device_words
+                except BaseException as exc:
+                    # Drop the last device reference before restoring the
+                    # caller's CUDA device; exception frames can otherwise
+                    # retain it beyond Device.__exit__.
+                    device_words = None
+                    traceback.clear_frames(exc.__traceback__)
+                    raise
             return self.cp.asarray(words, dtype=self.cp.uint32)
 
     def search(
@@ -517,19 +661,47 @@ class _CuVSRuntime:
         limit: int,
         mask: Optional[Any],
     ) -> Tuple[List[int], List[float]]:
+        batch_neighbors, batch_distances = self.search_batch(
+            runtime_index,
+            [query],
+            limit,
+            mask,
+        )
+        return batch_neighbors[0], batch_distances[0]
+
+    def search_batch(
+        self,
+        runtime_index: "_CuVSRuntimeIndex",
+        queries: Sequence[Sequence[float]],
+        limit: int,
+        mask: Optional[Any],
+    ) -> Tuple[List[List[int]], List[List[float]]]:
+        """Run compatible query rows in one cuVS call and preserve row order."""
+
+        if not queries:
+            return [], []
         with self.device_scope():
-            queries = None
+            device_queries = None
             prefilter = None
             distances = None
             neighbors = None
+            host_distances = None
+            host_neighbors = None
             resources = None
             resource_kwargs = None
             resource_reusable = False
             try:
                 index = runtime_index.index
-                resources = self._acquire_resources() if self._use_explicit_resources else None
-                resource_kwargs = {"resources": resources} if resources is not None else {}
-                queries = self.cp.asarray([query], dtype=self.device_dtype)
+                # Always provide an explicit resource, including the serialized
+                # max_concurrent_gpu_searches=1 case.  cuVS synchronizes an
+                # implicit resource before returning, but an owned reusable
+                # resource also pins worker-thread churn to a known stream and
+                # gives filter/result lifetimes an explicit synchronization
+                # boundary inside this admitted search.
+                resources = self._acquire_resources()
+                resource_kwargs = {"resources": resources}
+                query_count = len(queries)
+                device_queries = self.cp.asarray(queries, dtype=self.device_dtype)
                 if mask is None:
                     prefilter = None
                 elif isinstance(mask, self.cp.ndarray) and mask.dtype == self.cp.uint32:
@@ -539,7 +711,7 @@ class _CuVSRuntime:
                 if self.algorithm == "brute_force":
                     distances, neighbors = self.brute_force.search(
                         index,
-                        queries,
+                        device_queries,
                         limit,
                         prefilter=prefilter,
                         **resource_kwargs,
@@ -553,29 +725,41 @@ class _CuVSRuntime:
                     distances, neighbors = self.cagra.search(
                         params,
                         index,
-                        queries,
+                        device_queries,
                         limit,
                         filter=prefilter,
                         **resource_kwargs,
                     )
-                if resources is not None:
-                    resources.sync()
-                    resource_reusable = True
-                host_neighbors = self.cp.asnumpy(neighbors)[0].tolist()
-                host_distances = self.cp.asnumpy(distances)[0].tolist()
-                return [int(item) for item in host_neighbors], [
-                    float(item) for item in host_distances
-                ]
+                resources.sync()
+                host_neighbors = self.cp.asnumpy(neighbors)
+                host_distances = self.cp.asnumpy(distances)
+                result = (
+                    [
+                        [int(item) for item in host_neighbors[row].tolist()]
+                        for row in range(query_count)
+                    ],
+                    [
+                        [float(item) for item in host_distances[row].tolist()]
+                        for row in range(query_count)
+                    ],
+                )
+                # Reuse only after the complete call, including host result
+                # materialization, succeeds.  Any exception discards a
+                # potentially poisoned resource from the pool.
+                resource_reusable = True
+                return result
             except Exception as exc:
                 traceback.clear_frames(exc.__traceback__)
                 raise
             finally:
                 # Search temporaries otherwise outlive Device.__exit__ as frame
                 # locals and may free allocations on the worker's prior device.
-                queries = None
+                device_queries = None
                 prefilter = None
                 distances = None
                 neighbors = None
+                host_distances = None
+                host_neighbors = None
                 try:
                     if resources is not None:
                         self._return_resources(resources, reusable=resource_reusable)
@@ -597,7 +781,7 @@ class _CuVSRuntime:
 
 @dataclass(frozen=True)
 class _Record:
-    vector: Tuple[float, ...]
+    vector: bytes
     fields: Mapping[str, Any]
 
 
@@ -615,6 +799,31 @@ class _CuVSIndexSnapshot:
 
 
 @dataclass
+class _CuVSMicroBatchRequest:
+    """One admitted search waiting for a compatible matrix-query dispatch."""
+
+    snapshot: Optional[_CuVSIndexSnapshot]
+    query: Tuple[float, ...]
+    result_limit: int
+    mask: Optional[Any]
+    filter_identity: Union[str, int]
+    telemetry: Optional[CuVSSearchTelemetry]
+    enqueued_at: float
+    future: Future[Tuple[List[int], List[float]]]
+    warm_fast_path: bool = False
+    released: bool = False
+
+    @property
+    def key(self) -> Tuple[int, Union[str, int], int]:
+        snapshot = self.snapshot
+        return (
+            id(snapshot),
+            self.filter_identity,
+            self.result_limit,
+        )
+
+
+@dataclass
 class _CuVSBuildCandidate:
     runtime_index: Any
     labels: Tuple[int, ...]
@@ -629,15 +838,57 @@ class _CachedFilter:
     route_native: bool = False
     native_threshold: int = 0
     native_filter_token: int = 0
+    filter_words_packed: bool = False
 
 
 @dataclass(frozen=True)
 class _ResolvedNativeFilter:
-    bitset_words: Tuple[int, ...]
+    bitset_words: StoredNativeFilterWords
     eligible_count: int
     route_native: bool
     native_threshold: int
     native_filter_token: int = 0
+    filter_words_packed: bool = False
+
+
+@dataclass(frozen=True)
+class _CachedFilterMetadata:
+    """Host-only copy of route metadata from a potentially device-backed cache entry."""
+
+    eligible_count: int
+    route_native: bool
+    native_threshold: int
+    native_filter_token: int
+    filter_words_packed: bool
+
+
+@dataclass(frozen=True)
+class _PreparedHostFilter:
+    """Generation-bound host work completed before GPU admission.
+
+    This context deliberately never owns a device allocation. A cache hit is
+    represented only by copied route metadata; the device entry is borrowed
+    again after admission. Otherwise ``resolved_native_filter`` contains host
+    words whose conversion to a device bitset remains inside the GPU gate.
+    """
+
+    generation: int
+    cache_key: Optional[str]
+    cached_metadata: Optional[_CachedFilterMetadata] = None
+    resolved_native_filter: Optional[_ResolvedNativeFilter] = None
+
+
+@dataclass
+class _NativeFilterPreflightFlight:
+    generation: int
+    done: threading.Event = field(default_factory=threading.Event)
+    route_count: Optional[int] = None
+    eligible_count: int = 0
+    cached_metadata: Optional[_CachedFilterMetadata] = None
+    resolved_native_filter: Optional[_ResolvedNativeFilter] = None
+    error: Optional[BaseException] = None
+    stale: bool = False
+    participants: int = 1
 
 
 class CuVSDenseIndex:
@@ -682,6 +933,21 @@ class CuVSDenseIndex:
         self.max_concurrent_gpu_searches = int(config.get("max_concurrent_gpu_searches", 1))
         if self.max_concurrent_gpu_searches < 1:
             raise ValueError("cuVS max_concurrent_gpu_searches must be at least 1")
+        self.micro_batching_enabled = bool(config.get("micro_batching_enabled", False))
+        self.micro_batching_max_batch_size = int(config.get("micro_batching_max_batch_size", 8))
+        if not 1 <= self.micro_batching_max_batch_size <= 8:
+            raise ValueError("cuVS micro_batching_max_batch_size must be between 1 and 8")
+        self.micro_batching_max_wait_ms = float(config.get("micro_batching_max_wait_ms", 1.0))
+        if (
+            not math.isfinite(self.micro_batching_max_wait_ms)
+            or self.micro_batching_max_wait_ms < 0.0
+            or self.micro_batching_max_wait_ms > 100.0
+        ):
+            raise ValueError("cuVS micro_batching_max_wait_ms must be between 0 and 100")
+        if self.micro_batching_enabled and self.algorithm != "brute_force":
+            raise ValueError("cuVS micro-batching currently supports algorithm='brute_force' only")
+        if self.micro_batching_enabled and self.max_concurrent_gpu_searches != 1:
+            raise ValueError("cuVS micro-batching currently requires max_concurrent_gpu_searches=1")
         self.auto_memory_reserve_bytes = (
             int(config.get("auto_memory_reserve_mb", 1024)) * 1024 * 1024
         )
@@ -719,11 +985,16 @@ class CuVSDenseIndex:
         set_max_concurrent_searches = getattr(self._runtime, "set_max_concurrent_searches", None)
         if set_max_concurrent_searches is not None:
             set_max_concurrent_searches(self.max_concurrent_gpu_searches)
+        if self.micro_batching_enabled and not callable(
+            getattr(self._runtime, "search_batch", None)
+        ):
+            raise ValueError("The configured cuVS runtime does not support batched search")
         self._records: Dict[int, _Record] = {}
         self._snapshot: Optional[_CuVSIndexSnapshot] = None
         self._dirty = True
         self._filter_cache: OrderedDict[str, _CachedFilter] = OrderedDict()
         self._preflight_filter_cache: OrderedDict[str, _ResolvedNativeFilter] = OrderedDict()
+        self._preflight_flights: Dict[Tuple[int, str], _NativeFilterPreflightFlight] = {}
         self._lock = threading.RLock()
         self._idle_condition = threading.Condition(self._lock)
         self._active_searches = 0
@@ -731,11 +1002,31 @@ class CuVSDenseIndex:
         self._filter_layout_lock = threading.Lock()
         self._records_generation = 0
         self._filter_layout_generation = -1
+        self._closing = False
+        self._closed = False
+        self._close_complete = False
+        self._micro_batch_condition = threading.Condition(threading.Lock())
+        self._micro_batch_pending: OrderedDict[
+            Tuple[int, Union[str, int], int], List[_CuVSMicroBatchRequest]
+        ] = OrderedDict()
+        self._micro_batch_warm_lookahead = 0
+        self._micro_batch_draining = False
+        self._micro_batch_stop = False
+        self._micro_batch_worker_failure: Optional[BaseException] = None
+        self._micro_batch_worker: Optional[threading.Thread] = None
+        if self.micro_batching_enabled:
+            self._micro_batch_worker = threading.Thread(
+                target=self._micro_batch_worker_main,
+                name="openviking-cuvs-microbatch",
+                daemon=True,
+            )
+            self._micro_batch_worker.start()
         logger.info(
-            "Initialized cuVS dense index: algorithm=%s metric=%s dimension=%d",
+            "Initialized cuVS dense index: algorithm=%s metric=%s dimension=%d micro_batching=%s",
             self.algorithm,
             self._metric,
             self.dimension,
+            self.micro_batching_enabled,
         )
 
     def _runtime_device_scope(self):
@@ -748,17 +1039,32 @@ class CuVSDenseIndex:
             return len(self._records)
 
     @property
+    def host_shadow_nbytes(self) -> int:
+        """Return the compact FP32 vector payload size, excluding Python metadata."""
+
+        with self._lock:
+            return len(self._records) * self.dimension * _FP32_BYTES
+
+    @property
     def needs_rebuild(self) -> bool:
         with self._lock:
             return self._dirty
 
-    def _prepare_vector(self, vector: Sequence[float]) -> Tuple[float, ...]:
+    def _prepare_vector_values(self, vector: Sequence[float]) -> List[float]:
         if len(vector) != self.dimension:
             raise ValueError(
                 f"cuVS vector dimension mismatch: expected {self.dimension}, got {len(vector)}"
             )
-        prepared = _normalize(vector) if self.normalize_vectors else [float(v) for v in vector]
-        return tuple(prepared)
+        return _normalize(vector) if self.normalize_vectors else [float(v) for v in vector]
+
+    def _prepare_vector(self, vector: Sequence[float]) -> Tuple[float, ...]:
+        return tuple(self._prepare_vector_values(vector))
+
+    def _pack_vector(self, vector: Sequence[float]) -> bytes:
+        packed = array("f", self._prepare_vector_values(vector))
+        if packed.itemsize != _FP32_BYTES:
+            raise RuntimeError("cuVS host vector storage requires 4-byte IEEE FP32 values")
+        return packed.tobytes()
 
     @staticmethod
     def _parse_fields(value: str) -> Mapping[str, Any]:
@@ -776,7 +1082,7 @@ class CuVSDenseIndex:
                 if not candidate.vector:
                     continue
                 self._records[int(candidate.label)] = _Record(
-                    vector=self._prepare_vector(candidate.vector),
+                    vector=self._pack_vector(candidate.vector),
                     fields=self._parse_fields(candidate.fields),
                 )
             self._invalidate()
@@ -788,7 +1094,7 @@ class CuVSDenseIndex:
                 if not record.vector:
                     continue
                 self._records[int(record.label)] = _Record(
-                    vector=self._prepare_vector(record.vector),
+                    vector=self._pack_vector(record.vector),
                     fields=self._parse_fields(record.fields),
                 )
                 changed = True
@@ -807,9 +1113,19 @@ class CuVSDenseIndex:
     def _invalidate(self) -> None:
         self._records_generation += 1
         self._dirty = True
+        self._cancel_preflight_flights_()
         with self._runtime_device_scope():
             self._filter_cache.clear()
         self._preflight_filter_cache.clear()
+
+    def _cancel_preflight_flights_(self) -> None:
+        """Mark in-flight projections stale and wake waiters under ``_lock``."""
+
+        flights = tuple(self._preflight_flights.values())
+        self._preflight_flights.clear()
+        for flight in flights:
+            flight.stale = True
+            flight.done.set()
 
     @staticmethod
     def _filter_cache_key(filters: Mapping[str, Any]) -> Optional[str]:
@@ -825,6 +1141,16 @@ class CuVSDenseIndex:
         if cached is not None:
             self._filter_cache[cache_key] = cached
         return cached
+
+    @staticmethod
+    def _cached_filter_metadata(cached: _CachedFilter) -> _CachedFilterMetadata:
+        return _CachedFilterMetadata(
+            eligible_count=cached.eligible_count,
+            route_native=cached.route_native,
+            native_threshold=cached.native_threshold,
+            native_filter_token=cached.native_filter_token,
+            filter_words_packed=cached.filter_words_packed,
+        )
 
     def _cache_filter(self, cache_key: Optional[str], cached: _CachedFilter) -> None:
         if cache_key is None or self.filter_cache_size <= 0:
@@ -855,6 +1181,51 @@ class CuVSDenseIndex:
         while len(self._preflight_filter_cache) > capacity:
             self._preflight_filter_cache.popitem(last=False)
 
+    def _lookup_preflight_route_(
+        self,
+        cache_key: Optional[str],
+    ) -> Optional[Tuple[Optional[int], int]]:
+        cached = self._get_cached_filter(cache_key)
+        if cached is not None:
+            return (
+                cached.eligible_count if cached.route_native else None,
+                cached.eligible_count,
+            )
+        resolved = self._get_preflight_filter(cache_key)
+        if resolved is None:
+            return None
+        return (
+            resolved.eligible_count if resolved.route_native else None,
+            resolved.eligible_count,
+        )
+
+    def _store_preflight_route_(
+        self,
+        cache_key: Optional[str],
+        resolved: _ResolvedNativeFilter,
+    ) -> Tuple[Optional[int], int, bool]:
+        existing = self._lookup_preflight_route_(cache_key)
+        if existing is not None:
+            route_count, eligible_count = existing
+            return route_count, eligible_count, True
+        if not resolved.route_native and resolved.eligible_count != 0:
+            self._cache_preflight_filter(cache_key, resolved)
+            return None, resolved.eligible_count, False
+        cached = _CachedFilter(
+            prepared=None,
+            eligible_count=resolved.eligible_count,
+            route_native=resolved.route_native,
+            native_threshold=resolved.native_threshold,
+            native_filter_token=resolved.native_filter_token,
+            filter_words_packed=resolved.filter_words_packed,
+        )
+        self._cache_filter(cache_key, cached)
+        return (
+            cached.eligible_count if cached.route_native else None,
+            cached.eligible_count,
+            False,
+        )
+
     def native_filter_threshold(self, filters: Mapping[str, Any]) -> int:
         return (
             self.auto_path_filter_native_threshold
@@ -877,6 +1248,8 @@ class CuVSDenseIndex:
         with self._filter_layout_lock:
             with self._lock:
                 generation = self._records_generation
+                if self._closed:
+                    return None
                 if self._filter_layout_generation == generation:
                     return generation
                 ordered_labels = list(self._records)
@@ -884,7 +1257,7 @@ class CuVSDenseIndex:
             native_filter_layout_registrar(ordered_labels)
 
             with self._lock:
-                if self._records_generation != generation:
+                if self._closed or self._records_generation != generation:
                     return None
                 self._filter_layout_generation = generation
                 return generation
@@ -902,8 +1275,9 @@ class CuVSDenseIndex:
         try:
             if not self.auto_memory or not filters:
                 return None
-            cache_key = self._filter_cache_key(filters)
             with self._lock:
+                if self._closed:
+                    return None
                 if telemetry is not None:
                     telemetry.filter_kind = (
                         "path"
@@ -912,77 +1286,253 @@ class CuVSDenseIndex:
                     )
                     telemetry.records_generation = self._records_generation
                     telemetry.index_size = len(self._records)
-                cached = self._get_cached_filter(cache_key)
-                if cached is not None:
-                    if telemetry is not None:
-                        telemetry.filter_cache_hit = True
-                        telemetry.eligible_count = cached.eligible_count
-                    return cached.eligible_count if cached.route_native else None
                 native_threshold = self.native_filter_threshold(filters)
                 if native_threshold <= 0:
                     return None
-                preflight_cached = self._get_preflight_filter(cache_key)
-                if preflight_cached is not None:
-                    if telemetry is not None:
-                        telemetry.filter_cache_hit = True
-                        telemetry.eligible_count = preflight_cached.eligible_count
-                    return (
-                        preflight_cached.eligible_count if preflight_cached.route_native else None
-                    )
-
-            generation = self._ensure_native_filter_layout(native_filter_layout_registrar)
-            if generation is None:
+            prepared = self._prepare_host_filter(
+                filters,
+                native_filter_resolver,
+                native_filter_layout_registrar,
+                telemetry,
+            )
+            if prepared is None:
                 return None
-            resolved = self._resolve_native_filter(filters, native_filter_resolver)
+            cached = prepared.cached_metadata
+            resolved = prepared.resolved_native_filter
+            if cached is None and resolved is None:
+                raise RuntimeError("Native filter preflight completed without a result")
+            eligible_count = (
+                cached.eligible_count if cached is not None else resolved.eligible_count
+            )
+            route_native = cached.route_native if cached is not None else resolved.route_native
+            return eligible_count if route_native else None
+        finally:
             if telemetry is not None:
-                telemetry.eligible_count = resolved.eligible_count
+                telemetry.preflight_ms += (time.perf_counter() - started) * 1000.0
 
+    def _prepare_host_filter(
+        self,
+        filters: Mapping[str, Any],
+        native_filter_resolver: NativeFilterResolver,
+        native_filter_layout_registrar: Callable[[Sequence[int]], None],
+        telemetry: Optional[CuVSSearchTelemetry] = None,
+    ) -> Optional[_PreparedHostFilter]:
+        """Resolve and cache a generation-bound native bitmap without GPU admission."""
+
+        cache_key = self._filter_cache_key(filters)
+        with self._lock:
+            if self._closed:
+                return None
+            generation = self._records_generation
+            if telemetry is not None:
+                telemetry.filter_kind = (
+                    "path"
+                    if _filter_uses_field_type(filters, self.field_types, "path")
+                    else "scalar"
+                )
+                telemetry.records_generation = generation
+                telemetry.index_size = len(self._records)
+            cached = self._get_cached_filter(cache_key)
+            if cached is not None:
+                if telemetry is not None:
+                    telemetry.filter_cache_hit = True
+                    telemetry.eligible_count = cached.eligible_count
+                    telemetry.filter_words_packed = cached.filter_words_packed
+                return _PreparedHostFilter(
+                    generation,
+                    cache_key,
+                    cached_metadata=self._cached_filter_metadata(cached),
+                )
+            resolved = self._get_preflight_filter(cache_key)
+            if resolved is not None:
+                if telemetry is not None:
+                    telemetry.filter_cache_hit = True
+                    telemetry.eligible_count = resolved.eligible_count
+                    telemetry.filter_words_packed = resolved.filter_words_packed
+                return _PreparedHostFilter(
+                    generation,
+                    cache_key,
+                    resolved_native_filter=resolved,
+                )
+
+        # Keep the established _filter_layout_lock -> _lock order. The native
+        # resolver can then run unlocked against this registered row layout.
+        generation = self._ensure_native_filter_layout(native_filter_layout_registrar)
+        if generation is None:
+            return None
+
+        flight_key: Optional[Tuple[int, str]] = None
+        flight: Optional[_NativeFilterPreflightFlight] = None
+        is_owner = True
+        try:
             with self._lock:
-                if self._records_generation != generation:
+                if self._closed or self._records_generation != generation:
                     return None
                 cached = self._get_cached_filter(cache_key)
                 if cached is not None:
                     if telemetry is not None:
                         telemetry.filter_cache_hit = True
                         telemetry.eligible_count = cached.eligible_count
-                    return cached.eligible_count if cached.route_native else None
-                if not resolved.route_native and resolved.eligible_count != 0:
-                    self._cache_preflight_filter(cache_key, resolved)
+                        telemetry.filter_words_packed = cached.filter_words_packed
+                    return _PreparedHostFilter(
+                        generation,
+                        cache_key,
+                        cached_metadata=self._cached_filter_metadata(cached),
+                    )
+                resolved = self._get_preflight_filter(cache_key)
+                if resolved is not None:
+                    if telemetry is not None:
+                        telemetry.filter_cache_hit = True
+                        telemetry.eligible_count = resolved.eligible_count
+                        telemetry.filter_words_packed = resolved.filter_words_packed
+                    return _PreparedHostFilter(
+                        generation,
+                        cache_key,
+                        resolved_native_filter=resolved,
+                    )
+                if cache_key is not None:
+                    flight_key = (generation, cache_key)
+                    flight = self._preflight_flights.get(flight_key)
+                    if flight is None:
+                        flight = _NativeFilterPreflightFlight(generation=generation)
+                        self._preflight_flights[flight_key] = flight
+                    else:
+                        flight.participants += 1
+                        is_owner = False
+
+            if not is_owner:
+                # Mutation and close wake waiters through _cancel_preflight_flights_.
+                # Never wait while holding _lock.
+                flight.done.wait()
+                with self._lock:
+                    stale = flight.stale or self._closed or self._records_generation != generation
+                    error = flight.error
+                    cached = flight.cached_metadata
+                    resolved = flight.resolved_native_filter
+                if stale:
                     return None
-                cached = _CachedFilter(
-                    prepared=None,
-                    eligible_count=resolved.eligible_count,
-                    route_native=resolved.route_native,
-                    native_threshold=resolved.native_threshold,
-                    native_filter_token=resolved.native_filter_token,
+                if error is not None:
+                    raise error
+                if telemetry is not None:
+                    telemetry.filter_cache_hit = True
+                    telemetry.eligible_count = flight.eligible_count
+                    telemetry.filter_words_packed = bool(
+                        cached.filter_words_packed
+                        if cached is not None
+                        else resolved is not None and resolved.filter_words_packed
+                    )
+                return _PreparedHostFilter(
+                    generation,
+                    cache_key,
+                    cached_metadata=cached,
+                    resolved_native_filter=resolved,
                 )
-                self._cache_filter(cache_key, cached)
-                return cached.eligible_count if cached.route_native else None
-        finally:
-            if telemetry is not None:
-                telemetry.preflight_ms += (time.perf_counter() - started) * 1000.0
+
+            resolved = self._resolve_native_filter(filters, native_filter_resolver)
+            with self._lock:
+                stale = (
+                    self._closed
+                    or self._records_generation != generation
+                    or (flight is not None and flight.stale)
+                )
+                if flight is not None and self._preflight_flights.get(flight_key) is flight:
+                    self._preflight_flights.pop(flight_key, None)
+                if stale:
+                    if flight is not None:
+                        flight.stale = True
+                        flight.done.set()
+                    return None
+                route_count, eligible_count, cache_hit = self._store_preflight_route_(
+                    cache_key,
+                    resolved,
+                )
+                cached = self._get_cached_filter(cache_key)
+                cached_metadata = (
+                    self._cached_filter_metadata(cached) if cached is not None else None
+                )
+                if flight is not None:
+                    flight.route_count = route_count
+                    flight.eligible_count = eligible_count
+                    flight.cached_metadata = cached_metadata
+                    flight.resolved_native_filter = None if cached is not None else resolved
+                    flight.done.set()
+        except BaseException as exc:
+            if is_owner and flight is not None:
+                with self._lock:
+                    if self._preflight_flights.get(flight_key) is flight:
+                        self._preflight_flights.pop(flight_key, None)
+                    if not flight.stale:
+                        flight.error = exc
+                    flight.done.set()
+            raise
+
+        if telemetry is not None:
+            telemetry.filter_cache_hit = cache_hit
+            telemetry.eligible_count = eligible_count
+            telemetry.filter_words_packed = (
+                cached_metadata.filter_words_packed
+                if cached_metadata is not None
+                else resolved.filter_words_packed
+            )
+        return _PreparedHostFilter(
+            generation,
+            cache_key,
+            cached_metadata=cached_metadata,
+            resolved_native_filter=None if cached is not None else resolved,
+        )
 
     def _resolve_native_filter(
         self,
         filters: Mapping[str, Any],
         native_filter_resolver: NativeFilterResolver,
     ) -> _ResolvedNativeFilter:
+        with self._lock:
+            projection_generation = self._records_generation
+            projection_layout_generation = self._filter_layout_generation
+            projection_row_count = len(self._records)
         evaluation = native_filter_resolver(filters)
         if len(evaluation) == 2:
             words, eligible_count = evaluation
             native_filter_token = 0
         else:
             words, eligible_count, native_filter_token = evaluation
+        if isinstance(words, bytes):
+            if len(words) % _U32_BYTES != 0:
+                raise ValueError("Packed native filter bitmap length must be a multiple of 4 bytes")
+            bitset_words: StoredNativeFilterWords = words
+            bitset_word_count = len(words) // _U32_BYTES
+        else:
+            bitset_words = tuple(int(word) for word in words)
+            bitset_word_count = len(bitset_words)
+        eligible_count = int(eligible_count)
         native_threshold = self.native_filter_threshold(filters)
         route_native = (
             self.auto_memory and native_threshold > 0 and eligible_count <= native_threshold
         )
+        if not route_native and eligible_count > 0:
+            # Resolver work intentionally runs outside the records lock. Only
+            # enforce the ABI against the same registered layout snapshot;
+            # callers discard the result when a concurrent mutation wins.
+            with self._lock:
+                projection_is_stable = (
+                    projection_layout_generation == projection_generation
+                    and self._records_generation == projection_generation
+                    and self._filter_layout_generation == projection_generation
+                )
+            required_words = (projection_row_count + 31) // 32
+            if projection_is_stable and bitset_word_count < required_words:
+                raise RuntimeError(
+                    "Native filter resolver returned an incomplete bitset for GPU routing: "
+                    f"got {bitset_word_count} words for {projection_row_count} rows "
+                    f"(expected at least {required_words})"
+                )
         return _ResolvedNativeFilter(
-            bitset_words=tuple(int(word) for word in words),
-            eligible_count=int(eligible_count),
+            bitset_words=bitset_words,
+            eligible_count=eligible_count,
             route_native=route_native,
             native_threshold=native_threshold,
             native_filter_token=int(native_filter_token),
+            filter_words_packed=isinstance(bitset_words, bytes),
         )
 
     def _prepare_filter(
@@ -997,6 +1547,7 @@ class CuVSDenseIndex:
         if cached is not None:
             return cached
 
+        resolved: Optional[_ResolvedNativeFilter] = None
         if native_filter_resolver is not None:
             resolved = resolved_native_filter or self._resolve_native_filter(
                 filters, native_filter_resolver
@@ -1012,7 +1563,18 @@ class CuVSDenseIndex:
                     prepared = prepare_filter_words(resolved.bitset_words)
                 else:
                     prepared = tuple(
-                        bool(resolved.bitset_words[row // 32] & (1 << (row % 32)))
+                        bool(
+                            (
+                                struct.unpack_from(
+                                    "<I",
+                                    resolved.bitset_words,
+                                    (row // 32) * _U32_BYTES,
+                                )[0]
+                                if isinstance(resolved.bitset_words, bytes)
+                                else resolved.bitset_words[row // 32]
+                            )
+                            & (1 << (row % 32))
+                        )
                         for row in range(len(labels))
                     )
         else:
@@ -1035,14 +1597,44 @@ class CuVSDenseIndex:
             eligible_count=eligible_count,
             route_native=route_native,
             native_threshold=native_threshold,
-            native_filter_token=(
-                resolved_native_filter.native_filter_token
-                if resolved_native_filter is not None
-                else 0
-            ),
+            native_filter_token=(resolved.native_filter_token if resolved is not None else 0),
+            filter_words_packed=(resolved.filter_words_packed if resolved is not None else False),
         )
         self._cache_filter(cache_key, cached)
         return cached
+
+    def _check_auto_memory_budget(
+        self,
+        vector_count: int,
+        telemetry: Optional[CuVSSearchTelemetry],
+    ) -> None:
+        """Raise before a cuVS build when the estimated GPU peak is unsafe."""
+
+        estimate = estimate_cuvs_memory(
+            vector_count=vector_count,
+            dimension=self.dimension,
+            algorithm=self.algorithm,
+            build_params=self._build_params,
+            filter_cache_size=self.filter_cache_size,
+            safety_factor=self.auto_memory_safety_factor,
+            dtype=self.dtype,
+        )
+        if telemetry is not None:
+            telemetry.memory_estimated_peak_bytes = estimate.estimated_peak_bytes
+        try:
+            free_bytes, total_bytes = self._runtime.memory_info()
+        except Exception as exc:
+            raise CuVSMemoryBudgetError("cuVS auto mode could not read free GPU memory") from exc
+        usable_bytes = max(0, free_bytes - self.auto_memory_reserve_bytes)
+        if telemetry is not None:
+            telemetry.memory_free_bytes = free_bytes
+            telemetry.memory_usable_bytes = usable_bytes
+        if estimate.estimated_peak_bytes > usable_bytes:
+            raise CuVSMemoryBudgetError(
+                "cuVS auto mode kept native search because the estimated GPU peak "
+                f"({estimate.estimated_peak_bytes} bytes) exceeds the usable free "
+                f"memory ({usable_bytes} of {total_bytes} bytes after reserve)"
+            )
 
     def prepare_rebuild(
         self,
@@ -1051,9 +1643,8 @@ class CuVSDenseIndex:
         with self._lock:
             if not self._dirty:
                 return None
-            labels = tuple(self._records)
+            vector_count = len(self._records)
             generation = self._records_generation
-            dataset = [self._records[label].vector for label in labels]
             can_release_unused = self._active_searches == 0
             if can_release_unused:
                 with self._runtime_device_scope():
@@ -1061,44 +1652,43 @@ class CuVSDenseIndex:
 
         build_started = time.perf_counter()
         try:
-            if not labels:
+            if vector_count == 0:
                 return _CuVSBuildCandidate(
                     runtime_index=None,
-                    labels=labels,
+                    labels=(),
                     generation=generation,
                 )
-            with _CUVS_MEMORY_COORDINATOR.build_lock(self._runtime):
-                if self.auto_memory:
+
+            # Reject stable, known-insufficient budgets before copying every
+            # Python vector into a build dataset. Do not hold ``self._lock``
+            # while taking the device build lock: foreground rebuilds already
+            # use the opposite order through ``_search_admitted``.
+            if self.auto_memory:
+                with _CUVS_MEMORY_COORDINATOR.build_lock(self._runtime):
                     release_index = getattr(self._runtime, "release_index", None)
                     if release_index is not None and can_release_unused:
                         release_index()
-                    estimate = estimate_cuvs_memory(
-                        vector_count=len(labels),
-                        dimension=self.dimension,
-                        algorithm=self.algorithm,
-                        build_params=self._build_params,
-                        filter_cache_size=self.filter_cache_size,
-                        safety_factor=self.auto_memory_safety_factor,
-                        dtype=self.dtype,
+                    self._check_auto_memory_budget(vector_count, telemetry)
+
+            with self._lock:
+                if self._records_generation != generation:
+                    return _CuVSBuildCandidate(
+                        runtime_index=None,
+                        labels=(),
+                        generation=generation,
                     )
-                    if telemetry is not None:
-                        telemetry.memory_estimated_peak_bytes = estimate.estimated_peak_bytes
-                    try:
-                        free_bytes, total_bytes = self._runtime.memory_info()
-                    except Exception as exc:
-                        raise CuVSMemoryBudgetError(
-                            "cuVS auto mode could not read free GPU memory"
-                        ) from exc
-                    usable_bytes = max(0, free_bytes - self.auto_memory_reserve_bytes)
-                    if telemetry is not None:
-                        telemetry.memory_free_bytes = free_bytes
-                        telemetry.memory_usable_bytes = usable_bytes
-                    if estimate.estimated_peak_bytes > usable_bytes:
-                        raise CuVSMemoryBudgetError(
-                            "cuVS auto mode kept native search because the estimated GPU peak "
-                            f"({estimate.estimated_peak_bytes} bytes) exceeds the usable free "
-                            f"memory ({usable_bytes} of {total_bytes} bytes after reserve)"
-                        )
+                labels = tuple(self._records)
+                dataset = _PackedFP32Rows(
+                    tuple(self._records[label].vector for label in labels),
+                    self.dimension,
+                )
+
+            with _CUVS_MEMORY_COORDINATOR.build_lock(self._runtime):
+                # Admission is checked again while the per-device build lock is
+                # held. Another collection may have allocated GPU memory while
+                # this collection materialized its host dataset.
+                if self.auto_memory:
+                    self._check_auto_memory_budget(len(labels), telemetry)
                 try:
                     if telemetry is not None:
                         telemetry.build_performed = True
@@ -1189,6 +1779,387 @@ class CuVSDenseIndex:
             if self.commit_rebuild(candidate, native_filter_layout_registrar):
                 return
 
+    def _enqueue_micro_batch(
+        self,
+        *,
+        snapshot: _CuVSIndexSnapshot,
+        query: Tuple[float, ...],
+        result_limit: int,
+        mask: Optional[Any],
+        filter_identity: Union[str, int],
+        telemetry: Optional[CuVSSearchTelemetry],
+        warm_fast_path: bool = False,
+    ) -> Optional[_CuVSMicroBatchRequest]:
+        request = _CuVSMicroBatchRequest(
+            snapshot=snapshot,
+            query=query,
+            result_limit=result_limit,
+            mask=mask,
+            filter_identity=filter_identity,
+            telemetry=telemetry,
+            enqueued_at=time.perf_counter(),
+            future=Future(),
+            warm_fast_path=warm_fast_path,
+        )
+        with self._micro_batch_condition:
+            if self._micro_batch_worker_failure is not None:
+                raise RuntimeError("The cuVS micro-batch worker is unavailable") from (
+                    self._micro_batch_worker_failure
+                )
+            if self._micro_batch_stop:
+                raise RuntimeError("The cuVS micro-batch worker is closed")
+            if (
+                warm_fast_path
+                and self._micro_batch_warm_lookahead >= self.micro_batching_max_batch_size
+            ):
+                return None
+            self._micro_batch_pending.setdefault(request.key, []).append(request)
+            if warm_fast_path:
+                self._micro_batch_warm_lookahead += 1
+            self._micro_batch_condition.notify()
+        return request
+
+    def _try_enqueue_warm_micro_batch(
+        self,
+        *,
+        query: Tuple[float, ...],
+        limit: int,
+        filters: Optional[Mapping[str, Any]],
+        prepared_filter: Optional[_PreparedHostFilter],
+        telemetry: Optional[CuVSSearchTelemetry],
+    ) -> Optional[_CuVSMicroBatchRequest]:
+        """Queue one warm request without taking the caller-side GPU gate.
+
+        The worker remains the only owner of the device-search permit.  This
+        path merely pins an immutable, current-generation snapshot and an
+        already materialized device filter while the index lock prevents
+        mutation/close from racing the borrow.  A single batch worth of warm
+        requests may look ahead; overflow and every cold/stale case use the
+        established gated admission path.
+        """
+
+        # LocalIndex normalizes an omitted public-API filter from None to {},
+        # so both representations are the canonical no-filter case here.
+        no_filter = not filters
+        if no_filter:
+            cache_key: Optional[str] = None
+        else:
+            cache_key = (
+                prepared_filter.cache_key
+                if prepared_filter is not None
+                else self._filter_cache_key(filters)
+            )
+            if cache_key is None:
+                return None
+
+        with self._lock:
+            if self._closing or self._closed:
+                raise RuntimeError("cuVS dense index is closed")
+            generation = self._records_generation
+            if prepared_filter is not None and prepared_filter.generation != generation:
+                # Preserve the established admitted retry path for stale host
+                # work instead of creating a second, fast-path-only retry
+                # protocol.
+                return None
+            snapshot = self._snapshot
+            if self._dirty or snapshot is None or snapshot.generation != generation:
+                return None
+
+            mask: Optional[Any] = None
+            filter_identity: Union[str, int] = "no-filter"
+            if no_filter:
+                result_limit = min(limit, len(snapshot.labels))
+            else:
+                cached_filter = self._get_cached_filter(cache_key)
+                if cached_filter is None:
+                    # Host metadata can outlive a size-bounded device LRU
+                    # entry.  Preserve the existing one-shot in-gate recovery.
+                    if (
+                        telemetry is not None
+                        and prepared_filter is not None
+                        and prepared_filter.cached_metadata is not None
+                    ):
+                        telemetry.filter_cache_hit = False
+                        telemetry.filter_cache_eviction_fallback = True
+                    return None
+                if (
+                    cached_filter.eligible_count == 0
+                    or cached_filter.route_native
+                    or cached_filter.prepared is None
+                ):
+                    return None
+                mask = cached_filter.prepared
+                filter_identity = cache_key
+                result_limit = min(limit, cached_filter.eligible_count)
+                if telemetry is not None:
+                    telemetry.filter_cache_hit = True
+                    telemetry.eligible_count = cached_filter.eligible_count
+                    telemetry.filter_words_packed = cached_filter.filter_words_packed
+
+            if telemetry is not None:
+                telemetry.filter_kind = (
+                    "path"
+                    if filters and _filter_uses_field_type(filters, self.field_types, "path")
+                    else "scalar"
+                    if filters
+                    else "none"
+                )
+                telemetry.records_generation = generation
+                telemetry.index_size = len(self._records)
+
+            request = self._enqueue_micro_batch(
+                snapshot=snapshot,
+                query=query,
+                result_limit=result_limit,
+                mask=mask,
+                filter_identity=filter_identity,
+                telemetry=telemetry,
+                warm_fast_path=True,
+            )
+            if request is None:
+                return None
+            self._active_searches += 1
+            if telemetry is not None:
+                telemetry.micro_batching_warm_fast_path = True
+            return request
+
+    def _release_micro_batch_warm_lookahead(
+        self,
+        requests: Sequence[_CuVSMicroBatchRequest],
+    ) -> None:
+        with self._micro_batch_condition:
+            released = 0
+            for request in requests:
+                if request.warm_fast_path:
+                    request.warm_fast_path = False
+                    released += 1
+            if not released:
+                return
+            if released > self._micro_batch_warm_lookahead:
+                raise RuntimeError("cuVS micro-batch warm look-ahead accounting underflow")
+            self._micro_batch_warm_lookahead -= released
+            self._micro_batch_condition.notify_all()
+
+    @staticmethod
+    def _await_micro_batch_request(
+        request: _CuVSMicroBatchRequest,
+    ) -> Tuple[List[int], List[float]]:
+        try:
+            return request.future.result()
+        except BaseException:
+            request.future.cancel()
+            raise
+
+    def _next_micro_batch(self) -> Optional[List[_CuVSMicroBatchRequest]]:
+        wait_seconds = self.micro_batching_max_wait_ms / 1000.0
+        with self._micro_batch_condition:
+            while True:
+                if self._micro_batch_stop and not self._micro_batch_pending:
+                    return None
+                if not self._micro_batch_pending:
+                    self._micro_batch_condition.wait()
+                    continue
+
+                now = time.perf_counter()
+                selected_key: Optional[Tuple[int, Union[str, int], int]] = None
+                earliest_deadline: Optional[float] = None
+                for key, requests in self._micro_batch_pending.items():
+                    deadline = requests[0].enqueued_at + wait_seconds
+                    if (
+                        len(requests) >= self.micro_batching_max_batch_size
+                        or now >= deadline
+                        or self._micro_batch_draining
+                        or self._micro_batch_stop
+                    ):
+                        selected_key = key
+                        break
+                    if earliest_deadline is None or deadline < earliest_deadline:
+                        earliest_deadline = deadline
+
+                if selected_key is None:
+                    timeout = max((earliest_deadline or now) - now, 0.0)
+                    self._micro_batch_condition.wait(timeout)
+                    continue
+
+                requests = self._micro_batch_pending[selected_key]
+                batch = requests[: self.micro_batching_max_batch_size]
+                del requests[: len(batch)]
+                if not requests:
+                    del self._micro_batch_pending[selected_key]
+                return batch
+
+    @staticmethod
+    def _copy_micro_batch_exception(exc: BaseException) -> BaseException:
+        try:
+            return type(exc)(*exc.args)
+        except Exception:
+            return RuntimeError(f"cuVS micro-batch search failed: {exc}")
+
+    def _complete_micro_batch(
+        self,
+        requests: Sequence[_CuVSMicroBatchRequest],
+        *,
+        results: Optional[Sequence[Tuple[List[int], List[float]]]] = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        live_requests = [request for request in requests if not request.released]
+        if not live_requests:
+            return
+        # Drop the last references to snapshot-owned CUDA allocations on the
+        # captured device before close/rebuild can observe an idle index.
+        release_error: Optional[BaseException] = None
+        try:
+            with self._runtime_device_scope():
+                for request in live_requests:
+                    request.mask = None
+                    request.snapshot = None
+                    request.released = True
+        except BaseException as exc:
+            release_error = exc
+            for request in live_requests:
+                request.mask = None
+                request.snapshot = None
+                request.released = True
+        with self._lock:
+            self._active_searches -= len(live_requests)
+            if self._active_searches == 0:
+                self._idle_condition.notify_all()
+
+        for index, request in enumerate(live_requests):
+            if request.future.cancelled():
+                continue
+            completion_error = error or release_error
+            if completion_error is not None:
+                request.future.set_exception(self._copy_micro_batch_exception(completion_error))
+            else:
+                assert results is not None
+                request.future.set_result(results[index])
+
+    def _dispatch_micro_batch(self, requests: List[_CuVSMicroBatchRequest]) -> None:
+        runnable = [
+            request for request in requests if request.future.set_running_or_notify_cancel()
+        ]
+        runnable_ids = {id(request) for request in runnable}
+        cancelled = [request for request in requests if id(request) not in runnable_ids]
+        if cancelled:
+            self._release_micro_batch_warm_lookahead(cancelled)
+            self._complete_micro_batch(cancelled, results=[([], [])] * len(cancelled))
+        if not runnable:
+            return
+
+        first = runnable[0]
+        snapshot = first.snapshot
+        request_snapshot: Optional[_CuVSIndexSnapshot] = None
+        if snapshot is None:
+            self._release_micro_batch_warm_lookahead(runnable)
+            self._complete_micro_batch(
+                runnable,
+                error=RuntimeError("cuVS micro-batch snapshot was released before dispatch"),
+            )
+            return
+
+        try:
+            self._gpu_search_gate.acquire()
+        except BaseException as exc:
+            self._release_micro_batch_warm_lookahead(runnable)
+            self._complete_micro_batch(runnable, error=exc)
+            raise
+        try:
+            # Once this batch owns the gate it is the current device work, so
+            # one subsequent warm batch may begin filling behind it.
+            self._release_micro_batch_warm_lookahead(runnable)
+        except BaseException as exc:
+            self._gpu_search_gate.release()
+            self._complete_micro_batch(runnable, error=exc)
+            raise
+        gpu_started = time.perf_counter()
+        results: Optional[List[Tuple[List[int], List[float]]]] = None
+        error: Optional[BaseException] = None
+        try:
+            for request in runnable:
+                request_wait_ms = (gpu_started - request.enqueued_at) * 1000.0
+                if request.telemetry is not None:
+                    request.telemetry.micro_batching_enabled = True
+                    request.telemetry.batch_size = len(runnable)
+                    request.telemetry.batch_wait_ms += request_wait_ms
+                    request.telemetry.queue_ms += request_wait_ms
+            offsets_by_query, distances_by_query = self._runtime.search_batch(
+                snapshot.runtime_index,
+                [request.query for request in runnable],
+                first.result_limit,
+                first.mask,
+            )
+            if len(offsets_by_query) != len(runnable) or len(distances_by_query) != len(runnable):
+                raise RuntimeError("cuVS returned a different number of rows than requested")
+
+            results = []
+            for request, offsets, distances in zip(
+                runnable,
+                offsets_by_query,
+                distances_by_query,
+                strict=True,
+            ):
+                request_snapshot = request.snapshot
+                if request_snapshot is None:
+                    raise RuntimeError("cuVS micro-batch snapshot was released during dispatch")
+                labels: List[int] = []
+                scores: List[float] = []
+                for offset, distance in zip(offsets, distances, strict=True):
+                    if offset < 0 or offset >= len(request_snapshot.labels):
+                        continue
+                    labels.append(request_snapshot.labels[offset])
+                    scores.append(1.0 - distance if self.distance == "l2" else distance)
+                results.append((labels, scores))
+        except BaseException as exc:
+            error = exc
+        finally:
+            gpu_search_ms = (time.perf_counter() - gpu_started) * 1000.0
+            for request in runnable:
+                if request.telemetry is not None:
+                    request.telemetry.gpu_search_ms += gpu_search_ms
+            self._gpu_search_gate.release()
+            # Requests still own these objects until _complete_micro_batch(),
+            # so clearing worker locals here cannot release them prematurely.
+            # It does ensure active=0 is never published while this frame keeps
+            # an extra CUDA-owned snapshot reference alive.
+            try:
+                with self._runtime_device_scope():
+                    request_snapshot = None
+                    snapshot = None
+            except BaseException as cleanup_exc:
+                if error is None:
+                    error = cleanup_exc
+                request_snapshot = None
+                snapshot = None
+        self._complete_micro_batch(runnable, results=results, error=error)
+        if error is not None and not isinstance(error, Exception):
+            raise error
+
+    def _micro_batch_worker_main(self) -> None:
+        try:
+            while True:
+                requests = self._next_micro_batch()
+                if requests is None:
+                    return
+                self._dispatch_micro_batch(requests)
+        except BaseException as exc:
+            logger.exception("The cuVS micro-batch worker stopped unexpectedly")
+            with self._micro_batch_condition:
+                self._micro_batch_worker_failure = exc
+                pending = [
+                    request
+                    for requests in self._micro_batch_pending.values()
+                    for request in requests
+                ]
+                for request in pending:
+                    request.warm_fast_path = False
+                self._micro_batch_warm_lookahead = 0
+                self._micro_batch_pending.clear()
+                self._micro_batch_stop = True
+                self._micro_batch_condition.notify_all()
+            if pending:
+                self._complete_micro_batch(pending, error=exc)
+
     def search(
         self,
         query_vector: Sequence[float],
@@ -1200,35 +2171,137 @@ class CuVSDenseIndex:
     ) -> Tuple[List[int], List[float]]:
         if limit <= 0:
             return [], []
-        queue_started = time.perf_counter()
-        self._gpu_search_gate.acquire()
-        if telemetry is not None:
-            telemetry.queue_ms += (time.perf_counter() - queue_started) * 1000.0
-        try:
-            return self._search_admitted(
-                query_vector,
-                limit,
-                filters,
-                native_filter_resolver,
-                native_filter_layout_registrar,
-                telemetry,
-            )
-        finally:
-            self._gpu_search_gate.release()
+        query = self._prepare_vector(query_vector)
+        while True:
+            prepared_filter: Optional[_PreparedHostFilter] = None
+            if (
+                filters
+                and native_filter_resolver is not None
+                and native_filter_layout_registrar is not None
+            ):
+                filter_started = time.perf_counter()
+                try:
+                    prepared_filter = self._prepare_host_filter(
+                        filters,
+                        native_filter_resolver,
+                        native_filter_layout_registrar,
+                        telemetry,
+                    )
+                finally:
+                    if telemetry is not None:
+                        telemetry.filter_prepare_ms += (
+                            time.perf_counter() - filter_started
+                        ) * 1000.0
+                if prepared_filter is None:
+                    with self._lock:
+                        if self._closing or self._closed:
+                            raise RuntimeError("cuVS dense index is closed")
+                    # A mutation invalidated the registered native layout while
+                    # the resolver ran. Retry before consuming GPU admission.
+                    continue
+                cached = prepared_filter.cached_metadata
+                resolved = prepared_filter.resolved_native_filter
+                if cached is None and resolved is None:
+                    raise RuntimeError("Native filter preparation completed without a result")
+                eligible_count = (
+                    cached.eligible_count if cached is not None else resolved.eligible_count
+                )
+                route_native = cached.route_native if cached is not None else resolved.route_native
+                native_threshold = (
+                    cached.native_threshold if cached is not None else resolved.native_threshold
+                )
+                if eligible_count == 0:
+                    return [], []
+                if route_native:
+                    raise CuVSNativeRouteError(
+                        "cuVS auto mode routed a selective filter to native search "
+                        f"({eligible_count} candidates <= {native_threshold})"
+                    )
+
+            if self.micro_batching_enabled:
+                warm_request = self._try_enqueue_warm_micro_batch(
+                    query=query,
+                    limit=limit,
+                    filters=filters,
+                    prepared_filter=prepared_filter,
+                    telemetry=telemetry,
+                )
+                if warm_request is not None:
+                    return self._await_micro_batch_request(warm_request)
+
+                queue_started = time.perf_counter()
+                self._gpu_search_gate.acquire()
+                waited_ms = (time.perf_counter() - queue_started) * 1000.0
+                if telemetry is not None:
+                    telemetry.queue_ms += waited_ms
+                    telemetry.gpu_gate_queue_ms += waited_ms
+                try:
+                    try:
+                        admitted = self._search_admitted(
+                            query,
+                            limit,
+                            filters,
+                            native_filter_resolver,
+                            native_filter_layout_registrar,
+                            prepared_filter,
+                            telemetry,
+                            defer_micro_batch_wait=True,
+                        )
+                    except _StalePreparedFilter:
+                        continue
+                finally:
+                    # GPU rebuild/filter preparation and enqueue are admitted,
+                    # but waiting for the worker must never retain the gate.
+                    self._gpu_search_gate.release()
+                if isinstance(admitted, _CuVSMicroBatchRequest):
+                    return self._await_micro_batch_request(admitted)
+                return admitted
+
+            queue_started = time.perf_counter()
+            self._gpu_search_gate.acquire()
+            waited_ms = (time.perf_counter() - queue_started) * 1000.0
+            if telemetry is not None:
+                # queue_ms remains the aggregate of all lock/admission waits;
+                # gpu_gate_queue_ms isolates only this device-search permit.
+                telemetry.queue_ms += waited_ms
+                telemetry.gpu_gate_queue_ms += waited_ms
+            try:
+                try:
+                    return self._search_admitted(
+                        query,
+                        limit,
+                        filters,
+                        native_filter_resolver,
+                        native_filter_layout_registrar,
+                        prepared_filter,
+                        telemetry,
+                    )
+                except _StalePreparedFilter:
+                    continue
+            finally:
+                self._gpu_search_gate.release()
 
     def _search_admitted(
         self,
-        query_vector: Sequence[float],
+        query: Sequence[float],
         limit: int,
         filters: Optional[Mapping[str, Any]],
         native_filter_resolver: Optional[NativeFilterResolver] = None,
         native_filter_layout_registrar: Optional[Callable[[Sequence[int]], None]] = None,
+        prepared_filter: Optional[_PreparedHostFilter] = None,
         telemetry: Optional[CuVSSearchTelemetry] = None,
-    ) -> Tuple[List[int], List[float]]:
-        query = self._prepare_vector(query_vector)
-        if self.auto_memory and native_filter_layout_registrar is not None:
-            self._ensure_native_filter_layout(native_filter_layout_registrar)
+        *,
+        defer_micro_batch_wait: bool = False,
+    ) -> Union[Tuple[List[int], List[float]], _CuVSMicroBatchRequest]:
+        batch_request: Optional[_CuVSMicroBatchRequest] = None
         with self._lock:
+            if self._closing or self._closed:
+                raise RuntimeError("cuVS dense index is closed")
+            if (
+                prepared_filter is not None
+                and prepared_filter.generation != self._records_generation
+            ):
+                raise _StalePreparedFilter
             if telemetry is not None:
                 telemetry.filter_kind = (
                     "path"
@@ -1240,24 +2313,45 @@ class CuVSDenseIndex:
                 telemetry.records_generation = self._records_generation
                 telemetry.index_size = len(self._records)
             cached_filter: Optional[_CachedFilter] = None
-            resolved_native_filter: Optional[_ResolvedNativeFilter] = None
+            resolved_native_filter = (
+                prepared_filter.resolved_native_filter if prepared_filter is not None else None
+            )
+            if prepared_filter is not None and prepared_filter.cached_metadata is not None:
+                cached_filter = self._get_cached_filter(prepared_filter.cache_key)
+                if cached_filter is None:
+                    # The device LRU entry was evicted after host preparation.
+                    # This is the rare guaranteed-progress fallback: leave the
+                    # cached/resolved values empty so _prepare_filter resolves
+                    # and materializes this filter once inside the gate. The
+                    # common cache-miss path still resolves before admission.
+                    resolved_native_filter = None
+                    if telemetry is not None:
+                        telemetry.filter_cache_hit = False
+                        telemetry.filter_cache_eviction_fallback = True
             filter_layout_is_current = self._filter_layout_generation == self._records_generation
 
             # Auto mode decides whether a selective filter should remain native
             # before paying GPU admission or rebuild costs. A dirty native
             # layout is refreshed against the pending cuVS row order only; the
             # live GPU row mapping is not changed until a build actually runs.
-            if filters and self.auto_memory and native_filter_resolver is not None:
+            if (
+                filters
+                and self.auto_memory
+                and native_filter_resolver is not None
+                and prepared_filter is None
+            ):
                 cache_key = self._filter_cache_key(filters)
                 cached_filter = self._get_cached_filter(cache_key)
                 if cached_filter is not None and telemetry is not None:
                     telemetry.filter_cache_hit = True
                     telemetry.eligible_count = cached_filter.eligible_count
+                    telemetry.filter_words_packed = cached_filter.filter_words_packed
                 if cached_filter is None:
                     resolved_native_filter = self._get_preflight_filter(cache_key)
                     if resolved_native_filter is not None and telemetry is not None:
                         telemetry.filter_cache_hit = True
                         telemetry.eligible_count = resolved_native_filter.eligible_count
+                        telemetry.filter_words_packed = resolved_native_filter.filter_words_packed
                     if resolved_native_filter is None:
                         if (
                             self._dirty
@@ -1270,6 +2364,10 @@ class CuVSDenseIndex:
                         resolved_native_filter = self._resolve_native_filter(
                             filters, native_filter_resolver
                         )
+                        if telemetry is not None:
+                            telemetry.filter_words_packed = (
+                                resolved_native_filter.filter_words_packed
+                            )
                     if (
                         resolved_native_filter.route_native
                         or resolved_native_filter.eligible_count == 0
@@ -1280,6 +2378,7 @@ class CuVSDenseIndex:
                             route_native=resolved_native_filter.route_native,
                             native_threshold=resolved_native_filter.native_threshold,
                             native_filter_token=resolved_native_filter.native_filter_token,
+                            filter_words_packed=resolved_native_filter.filter_words_packed,
                         )
                         self._cache_filter(cache_key, cached_filter)
 
@@ -1308,6 +2407,7 @@ class CuVSDenseIndex:
                     cached_filter = self._get_cached_filter(self._filter_cache_key(filters))
                     if cached_filter is not None and telemetry is not None:
                         telemetry.filter_cache_hit = True
+                        telemetry.filter_words_packed = cached_filter.filter_words_packed
                 cached_filter = cached_filter or self._prepare_filter(
                     filters,
                     snapshot.labels,
@@ -1317,6 +2417,7 @@ class CuVSDenseIndex:
                 if telemetry is not None:
                     telemetry.filter_prepare_ms += (time.perf_counter() - filter_started) * 1000.0
                     telemetry.eligible_count = cached_filter.eligible_count
+                    telemetry.filter_words_packed = cached_filter.filter_words_packed
                 mask = cached_filter.prepared
                 eligible_count = cached_filter.eligible_count
                 if eligible_count == 0:
@@ -1330,7 +2431,31 @@ class CuVSDenseIndex:
                 result_limit = min(limit, eligible_count)
             else:
                 result_limit = min(limit, len(snapshot.labels))
+            if self.micro_batching_enabled:
+                cache_key = self._filter_cache_key(filters) if filters else "no-filter"
+                filter_identity: Union[str, int] = (
+                    cache_key
+                    if cache_key is not None
+                    else id(mask)
+                    if mask is not None
+                    else id(filters)
+                )
+                batch_request = self._enqueue_micro_batch(
+                    snapshot=snapshot,
+                    query=query,
+                    result_limit=result_limit,
+                    mask=mask,
+                    filter_identity=filter_identity,
+                    telemetry=telemetry,
+                )
+                if batch_request is None:
+                    raise RuntimeError("cuVS gated micro-batch enqueue unexpectedly failed")
             self._active_searches += 1
+
+        if batch_request is not None:
+            if defer_micro_batch_wait:
+                return batch_request
+            return self._await_micro_batch_request(batch_request)
 
         labels: List[int] = []
         scores: List[float] = []
@@ -1371,10 +2496,59 @@ class CuVSDenseIndex:
 
     def close(self) -> None:
         with self._lock:
+            if self._close_complete:
+                return
+            while self._closing and not self._close_complete:
+                self._idle_condition.wait()
+            if self._close_complete:
+                return
+
+            # Reject new admission and invalidate any host-filter work that is
+            # still outside the index lock. Already accepted micro-batch
+            # requests remain active and are drained below.
+            self._closing = True
+            if not self._closed:
+                self._closed = True
+                self._records_generation += 1
+                self._filter_layout_generation = -1
+                self._cancel_preflight_flights_()
+            if self.micro_batching_enabled:
+                with self._micro_batch_condition:
+                    self._micro_batch_draining = True
+                    self._micro_batch_condition.notify_all()
             while self._active_searches:
                 self._idle_condition.wait()
-            with self._runtime_device_scope():
-                self._snapshot = None
-                self._filter_cache.clear()
-                self._preflight_filter_cache.clear()
-                self._runtime.close()
+
+        if self.micro_batching_enabled:
+            with self._micro_batch_condition:
+                self._micro_batch_stop = True
+                self._micro_batch_condition.notify_all()
+            worker = self._micro_batch_worker
+            if worker is not None and worker is not threading.current_thread():
+                worker.join()
+
+        try:
+            with self._lock:
+                with self._runtime_device_scope():
+                    self._snapshot = None
+                    self._filter_cache.clear()
+                    self._preflight_filter_cache.clear()
+                    try:
+                        self._runtime.close()
+                    finally:
+                        # A failed recovery can otherwise keep this partially
+                        # packed host shadow alive through the constructor
+                        # traceback.
+                        self._records.clear()
+        except BaseException:
+            with self._lock:
+                # Keep admission closed, but allow a later close() call to
+                # retry runtime cleanup after a transient failure.
+                self._closing = False
+                self._idle_condition.notify_all()
+            raise
+        else:
+            with self._lock:
+                self._close_complete = True
+                self._closing = False
+                self._idle_condition.notify_all()

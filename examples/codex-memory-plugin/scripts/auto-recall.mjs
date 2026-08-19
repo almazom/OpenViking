@@ -13,11 +13,11 @@
  * is just `{}`.
  */
 
-import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.mjs";
+import { trySpawnCodex } from "./codex-launch.mjs";
 import { createLogger } from "./debug-log.mjs";
 import {
   buildCodexExecArgs,
@@ -26,7 +26,12 @@ import {
   markRecallCompressorRuntimeFailed,
 } from "./recall-compressor-profile.mjs";
 import { deriveOvSessionId } from "./session-state.mjs";
-import { postRecall } from "./shared/recall-core.mjs";
+import {
+  buildRecallEndpointBody,
+  fetchAssembledContext,
+  normalizeContextEntry,
+  postRecall,
+} from "./shared/recall-core.mjs";
 import { resolveEffectivePeerId } from "./shared/workspace-peer.mjs";
 
 const cfg = loadConfig();
@@ -36,6 +41,7 @@ const effectivePeer = resolveEffectivePeerId({ cfg, cwd: process.cwd() });
 let emitted = false;
 let activeCompressor = null;
 let recallDeadline = null;
+const DEFAULT_FINAL_RECALL_CHARS = 6500;
 
 function output(obj, exitAfter = false) {
   if (emitted) return;
@@ -86,9 +92,12 @@ recallDeadline = setTimeout(() => {
 }, cfg.recallTimeoutMs);
 recallDeadline.unref?.();
 
-async function fetchJSON(path, init = {}) {
+async function fetchJSON(path, init = {}, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(),
+    Math.max(1000, Number(options.timeoutMs) || cfg.timeoutMs),
+  );
   try {
     const headers = { "Content-Type": "application/json" };
     if (cfg.apiKey) {
@@ -98,6 +107,7 @@ async function fetchJSON(path, init = {}) {
     if (cfg.sendIdentityHeaders && cfg.account) headers["X-OpenViking-Account"] = cfg.account;
     if (cfg.sendIdentityHeaders && cfg.user) headers["X-OpenViking-User"] = cfg.user;
     if (effectivePeer.peerId) headers["X-OpenViking-Actor-Peer"] = effectivePeer.peerId;
+    if (cfg.userAgent) headers["User-Agent"] = cfg.userAgent;
     const res = await fetch(`${cfg.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
     const body = await res.json().catch(() => null);
     if (!body) return { ok: false, status: res.status };
@@ -297,33 +307,55 @@ async function readMemoryContent(uri) {
   return null;
 }
 
-async function recallViaTypeQuotaEndpoint(query) {
-  const body = {
-    query,
-    quotas: {
-      events: Math.max(cfg.recallLimit, 1),
-      entities: Math.max(cfg.recallLimit, 1),
-      preferences: Math.max(1, Math.min(cfg.recallLimit, 3)),
-      experiences: 0,
-    },
-    max_chars: cfg.recallCompressMaxInputChars || 6500,
-    min_score: cfg.scoreThreshold,
-    render: true,
+function assembledToRecallResult(rendered, entries) {
+  const items = entries
+    .map(normalizeContextEntry)
+    .map((entry) => ({ ...entry, score: clampScore(entry.score) }))
+    .filter((entry) => entry.uri && entry.text);
+  const context = rendered
+    ? [
+        "OpenViking memory digest:",
+        rendered,
+        "",
+        "More detail: use the OpenViking MCP recall/read/search tools with cited viking:// URIs if needed.",
+      ].join("\n")
+    : "";
+  return { context, items };
+}
+
+async function recallViaServerAssembly(query, ovSessionId = "") {
+  const maxInputChars = cfg.recallCompress
+    ? cfg.recallCompressMaxInputChars
+    : DEFAULT_FINAL_RECALL_CHARS;
+  const assembleCfg = {
+    ...cfg,
+    // Local compression happens below, so ask the server for the assembled
+    // block only. The server budget stays independent from the compressor's
+    // input-character ceiling.
+    recallRewrite: "off",
   };
-  if (cfg.recallPeerScope === "actor") body.peer_scope = "actor";
+
+  const assembled = await fetchAssembledContext(fetchJSON, assembleCfg, query, {
+    actorPeerId: effectivePeer.peerId,
+    sessionId: ovSessionId,
+    log,
+  });
+  if (assembled) {
+    return assembledToRecallResult(assembled.rendered, assembled.entries);
+  }
+
+  const body = buildRecallEndpointBody(cfg);
+  body.query = query;
+  body.max_chars = maxInputChars;
   const result = await postRecall(fetchJSON, body, { actorPeerId: effectivePeer.peerId, log });
   if (!result.ok) {
     log("recall_endpoint_fallback", { status: result.status || 0 });
     return null;
   }
-  const rendered = String(result.result?.rendered || "").trim();
-  if (!rendered) return "";
-  return [
-    "OpenViking memory digest:",
-    rendered,
-    "",
-    "More detail: use the OpenViking MCP recall/read/search tools with cited viking:// URIs if needed.",
-  ].join("\n");
+  return assembledToRecallResult(
+    String(result.result?.rendered || "").trim(),
+    Array.isArray(result.result?.entries) ? result.result.entries : [],
+  );
 }
 
 function truncateText(text, maxChars) {
@@ -399,11 +431,11 @@ async function runCodexCompressor(prompt, profile) {
         OPENVIKING_AUTO_CAPTURE: "0",
         OPENVIKING_RECALL_COMPRESS: "0",
       };
+      let child = null;
+      let timer = null;
       let done = false;
       let timedOut = false;
       let stderr = "";
-      const child = spawn("codex", args, { env, stdio: ["pipe", "ignore", "pipe"] });
-      activeCompressor = child;
       const finish = (value, { runtimeFailed = false } = {}) => {
         if (done) return;
         done = true;
@@ -422,7 +454,15 @@ async function runCodexCompressor(prompt, profile) {
         }
         resolve(value);
       };
-      const timer = setTimeout(() => {
+      const launch = trySpawnCodex(args, { env, stdio: ["pipe", "ignore", "pipe"] });
+      if (launch.error) {
+        logError("compress_spawn", launch.error);
+        finish(null, { runtimeFailed: true });
+        return;
+      }
+      child = launch.child;
+      activeCompressor = child;
+      timer = setTimeout(() => {
         timedOut = true;
         logError("compress_timeout", `timed out after ${cfg.recallCompressTimeoutMs}ms`);
         try {
@@ -554,15 +594,33 @@ async function main() {
     return;
   }
 
-  const endpointRecall = await recallViaTypeQuotaEndpoint(userPrompt);
+  const endpointRecall = await recallViaServerAssembly(userPrompt, recallSessionId || "");
   if (endpointRecall !== null) {
-    if (!endpointRecall) {
+    if (!endpointRecall.context && endpointRecall.items.length === 0) {
       log("skip", { stage: "recall_endpoint", reason: "no results" });
       emit();
       return;
     }
-    log("recall_endpoint", { chars: endpointRecall.length });
-    emit(endpointRecall);
+    const compressedContext = endpointRecall.items.length > 0
+      ? await compressMemoryContext(userPrompt, endpointRecall.items)
+      : null;
+    const endpointFallback = cfg.recallCompress && endpointRecall.items.length > 0
+      ? fallbackDigest(endpointRecall.items)
+      : endpointRecall.context;
+    const memoryContext = compressedContext === null
+      ? endpointFallback
+      : compressedContext;
+    if (!memoryContext) {
+      log("skip", { stage: "recall_endpoint", reason: "compressor found no relevant memory" });
+      emit();
+      return;
+    }
+    log("recall_endpoint", {
+      chars: memoryContext.length,
+      compressed: compressedContext !== null,
+      entryCount: endpointRecall.items.length,
+    });
+    emit(memoryContext);
     return;
   }
 

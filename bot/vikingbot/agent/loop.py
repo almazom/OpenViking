@@ -17,9 +17,11 @@ from loguru import logger
 
 from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.memory import MemoryStore
+from vikingbot.agent.remote_skills import SkillRuntimeContext
+from vikingbot.agent.skills import SkillsLoader
 from vikingbot.agent.subagent import SubagentManager
 from vikingbot.agent.tools import register_default_tools
-from vikingbot.agent.tools.registry import ToolRegistry
+from vikingbot.agent.tools.registry import ToolExecutionResult, ToolRegistry
 from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
 from vikingbot.config.schema import BotMode, Config, SessionKey
@@ -84,6 +86,16 @@ class _PlainTextFinal:
     """Signal that the text should be treated as the final reply; exit the loop."""
 
     content: str | None = None
+
+
+class AgentIterationLimitExceeded(RuntimeError):
+    """A structured task used every available AgentLoop iteration without submitting."""
+
+    def __init__(self, max_iterations: int):
+        self.max_iterations = max_iterations
+        super().__init__(
+            f"Agent reached its {max_iterations}-iteration limit without submitting a valid bundle"
+        )
 
 
 class AgentLoop:
@@ -234,45 +246,6 @@ class AgentLoop:
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
         self._mcp_connected = False
-
-    async def _publish_thinking_event(
-        self, session_key: SessionKey, event_type: OutboundEventType, content: str
-    ) -> None:
-        """
-        Publish a thinking event to the message bus.
-
-        Thinking events are used to communicate the agent's internal processing
-        state to the user, such as when the agent is executing a tool or
-        processing a complex request.
-
-        Args:
-            session_key: The session key identifying the conversation.
-            event_type: The type of thinking event (e.g., THINKING, TOOL_START).
-            content: The message content to display to the user.
-
-        Note:
-            This is an internal method used by the agent loop to communicate
-            progress to users during long-running operations.
-
-        Example:
-            async def notify_tool_call() -> None:
-                await self._publish_thinking_event(
-                    session_key=SessionKey(
-                        type="telegram",
-                        channel_id="default",
-                        chat_id="123",
-                    ),
-                    event_type=OutboundEventType.TOOL_CALL,
-                    content="Executing web search...",
-                )
-        """
-        await self.bus.publish_outbound(
-            OutboundMessage(
-                session_key=session_key,
-                content=content,
-                event_type=event_type,
-            )
-        )
 
     async def _publish_auto_memory_context(
         self,
@@ -488,6 +461,236 @@ class AgentLoop:
             provider_name=provider_name,
         )
 
+    @staticmethod
+    def _history_message_tokens(message: dict[str, Any]) -> int:
+        """Estimate prompt tokens for one formatted history message."""
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        # Reserve a small amount for the role and provider message framing.
+        return cal_str_tokens(content, text_type="mixed") + 4
+
+    @classmethod
+    def _truncate_history_message(
+        cls,
+        message: dict[str, Any],
+        token_budget: int,
+    ) -> dict[str, Any] | None:
+        """Return a prompt-only copy of a message clipped to ``token_budget``."""
+        if token_budget <= 4:
+            return None
+
+        content = message.get("content", "")
+        if not isinstance(content, str) or not content:
+            return None
+
+        content_budget = token_budget - 4
+        marker = "\n[History truncated to fit session context token budget]"
+
+        def fits(value: str) -> bool:
+            return cal_str_tokens(value, text_type="mixed") <= content_budget
+
+        low = 0
+        high = len(content)
+        best = ""
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = content[:mid] + (marker if mid < len(content) else "")
+            if fits(candidate):
+                best = candidate
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        # Very small budgets may not fit the marker. Preserve as much raw text
+        # as possible while still honoring the hard limit.
+        if not best:
+            # Empty content is not a valid candidate and breaks the monotonic
+            # assumption of this binary search: "" is rejected while a
+            # one-character prefix may fit.
+            low = 1
+            high = len(content)
+            while low <= high:
+                mid = (low + high) // 2
+                candidate = content[:mid]
+                if candidate and fits(candidate):
+                    best = candidate
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+        if not best:
+            return None
+
+        clipped = dict(message)
+        clipped["content"] = best
+        # Reasoning is not part of OV session messages. Drop any provider-only
+        # reasoning field from a clipped local fallback message so it cannot
+        # silently exceed the session-history budget.
+        clipped.pop("reasoning_content", None)
+        return clipped
+
+    @classmethod
+    def _trim_history_to_token_budget(
+        cls,
+        messages: list[dict[str, Any]],
+        token_budget: int,
+    ) -> list[dict[str, Any]]:
+        """Fit history to a hard budget without dropping the latest User anchor."""
+        if token_budget <= 0 or not messages:
+            return []
+
+        total_tokens = sum(cls._history_message_tokens(message) for message in messages)
+        if total_tokens <= token_budget:
+            return messages
+
+        latest_anchor_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role") == "user"
+            ),
+            None,
+        )
+        if latest_anchor_index is None:
+            # Legacy assistant-only history has no Turn boundary to preserve.
+            remaining = token_budget
+            retained_reversed: list[dict[str, Any]] = []
+            for message in reversed(messages):
+                message_tokens = cls._history_message_tokens(message)
+                if message_tokens <= remaining:
+                    retained_reversed.append(message)
+                    remaining -= message_tokens
+                    continue
+
+                clipped = cls._truncate_history_message(message, remaining)
+                if clipped is not None:
+                    retained_reversed.append(clipped)
+                break
+            return list(reversed(retained_reversed))
+
+        final_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, latest_anchor_index, -1)
+                if messages[index].get("role") == "assistant"
+            ),
+            None,
+        )
+
+        selected: dict[int, dict[str, Any]] = {}
+        used_tokens = 0
+
+        def _select_message(
+            index: int,
+            *,
+            allow_truncate: bool,
+            max_budget: int | None = None,
+        ) -> tuple[bool, bool]:
+            nonlocal used_tokens
+            remaining = max(0, token_budget - used_tokens)
+            if max_budget is not None:
+                remaining = min(remaining, max(0, int(max_budget)))
+
+            message = messages[index]
+            message_tokens = cls._history_message_tokens(message)
+            chosen = message
+            truncated = False
+            if message_tokens > remaining:
+                if not allow_truncate or remaining <= 0:
+                    return False, False
+                clipped = cls._truncate_history_message(message, remaining)
+                if clipped is None:
+                    return False, False
+                chosen = clipped
+                truncated = True
+
+            selected[index] = chosen
+            used_tokens += cls._history_message_tokens(chosen)
+            return True, truncated
+
+        def _minimum_message_budget(index: int) -> int | None:
+            message = messages[index]
+            message_tokens = cls._history_message_tokens(message)
+            if message_tokens == 0:
+                return 0
+
+            low = 1
+            high = min(message_tokens, token_budget)
+            minimum: int | None = None
+            while low <= high:
+                candidate = (low + high) // 2
+                if cls._truncate_history_message(message, candidate) is not None:
+                    minimum = candidate
+                    high = candidate - 1
+                else:
+                    low = candidate + 1
+            return minimum
+
+        # OpenViking already returns Turn-aware context, but VikingBot applies a
+        # second budget with a different estimator after adding the local tail.
+        # Jointly reserve room for the latest User anchor and final Assistant so
+        # this final boundary cannot turn the prompt back into a half Turn.
+        final_reserve = 0
+        if final_index is not None:
+            anchor_minimum = _minimum_message_budget(latest_anchor_index)
+            final_minimum = _minimum_message_budget(final_index)
+            if (
+                anchor_minimum is not None
+                and final_minimum is not None
+                and anchor_minimum + final_minimum <= token_budget
+            ):
+                final_reserve = min(
+                    cls._history_message_tokens(messages[final_index]),
+                    max(final_minimum, token_budget // 2),
+                    token_budget - anchor_minimum,
+                )
+
+        _select_message(
+            latest_anchor_index,
+            allow_truncate=True,
+            max_budget=token_budget - final_reserve,
+        )
+        if final_index is not None:
+            _select_message(final_index, allow_truncate=True)
+
+        # Prefer the newest remaining Steps in the latest Turn. At most one Step
+        # is clipped; older material is useful only while this suffix remains
+        # lossless.
+        latest_turn_end = final_index if final_index is not None else len(messages)
+        for index in range(latest_turn_end - 1, latest_anchor_index, -1):
+            kept, truncated = _select_message(index, allow_truncate=True)
+            if not kept or truncated:
+                break
+
+        # Add older Turns only as complete units so the final prompt never starts
+        # from the assistant half of an earlier Turn. An assistant-only prefix
+        # such as the archive overview is treated as one conservative unit.
+        older_turns: list[list[int]] = []
+        current_turn: list[int] = []
+        for index in range(latest_anchor_index):
+            if messages[index].get("role") == "user" and current_turn:
+                older_turns.append(current_turn)
+                current_turn = []
+            current_turn.append(index)
+        if current_turn:
+            older_turns.append(current_turn)
+
+        remaining = token_budget
+        remaining -= used_tokens
+        for turn_indexes in reversed(older_turns):
+            turn_tokens = sum(
+                cls._history_message_tokens(messages[index]) for index in turn_indexes
+            )
+            if turn_tokens > remaining:
+                break
+            for index in turn_indexes:
+                selected[index] = messages[index]
+            used_tokens += turn_tokens
+            remaining -= turn_tokens
+
+        return [selected[index] for index in sorted(selected)]
+
     async def _build_prompt_history(
         self,
         session: Session,
@@ -525,7 +728,25 @@ class AgentLoop:
                 get_unsynced_messages(session),
                 provider_name=provider_name,
             )
-            return ov_history + local_tail
+            combined_history = ov_history + local_tail
+            trimmed_history = self._trim_history_to_token_budget(
+                combined_history,
+                token_budget,
+            )
+            if len(trimmed_history) != len(combined_history) or any(
+                before.get("content") != after.get("content")
+                for before, after in zip(
+                    combined_history[-len(trimmed_history) :],
+                    trimmed_history,
+                    strict=False,
+                )
+            ):
+                logger.info(
+                    f"Trimmed OpenViking session history for {session_id} to "
+                    f"token_budget={token_budget}: messages={len(combined_history)}"
+                    f"->{len(trimmed_history)}"
+                )
+            return trimmed_history
         except Exception as e:
             logger.warning(
                 f"Failed to load OpenViking session context for {session_id}: {e}. "
@@ -541,7 +762,7 @@ class AgentLoop:
         session: Session,
         *,
         force_commit: bool = False,
-        keep_recent_count: int | None = None,
+        keep_recent_turn_count: int | None = None,
         commit_message_threshold: int | None = None,
         openviking_connection: dict[str, Any] | None = None,
     ) -> bool:
@@ -554,8 +775,8 @@ class AgentLoop:
             "session": session,
             "force_commit": force_commit,
         }
-        if keep_recent_count is not None:
-            kwargs["keep_recent_count"] = keep_recent_count
+        if keep_recent_turn_count is not None:
+            kwargs["keep_recent_turn_count"] = keep_recent_turn_count
         if commit_message_threshold is not None:
             kwargs["commit_message_threshold"] = commit_message_threshold
         if openviking_connection:
@@ -580,14 +801,14 @@ class AgentLoop:
         session: Session,
         *,
         force_commit: bool = False,
-        keep_recent_count: int | None = None,
+        keep_recent_turn_count: int | None = None,
         commit_message_threshold: int | None = None,
         openviking_connection: dict[str, Any] | None = None,
     ) -> bool:
         success = await self._submit_openviking_session(
             session,
             force_commit=force_commit,
-            keep_recent_count=keep_recent_count,
+            keep_recent_turn_count=keep_recent_turn_count,
             commit_message_threshold=commit_message_threshold,
             openviking_connection=openviking_connection,
         )
@@ -633,7 +854,9 @@ class AgentLoop:
         await self._submit_openviking_session_and_clear_if_committed(
             session,
             force_commit=True,
-            keep_recent_count=int(getattr(agents_config, "commit_keep_recent_count", 10) or 0),
+            keep_recent_turn_count=int(
+                getattr(agents_config, "commit_keep_recent_turn_count", 3) or 0
+            ),
             commit_message_threshold=self.memory_window,
             openviking_connection=getattr(msg, "openviking_connection", None),
         )
@@ -642,7 +865,7 @@ class AgentLoop:
         self,
         session: Session,
         *,
-        keep_recent_count: int = 0,
+        keep_recent_turn_count: int = 0,
         clear_local_session: bool = False,
         rotate_session_id: bool = False,
         openviking_connection: dict[str, Any] | None = None,
@@ -650,7 +873,7 @@ class AgentLoop:
         success = await self._submit_openviking_session(
             session,
             force_commit=True,
-            keep_recent_count=keep_recent_count,
+            keep_recent_turn_count=keep_recent_turn_count,
             openviking_connection=openviking_connection,
         )
         if not success:
@@ -712,6 +935,12 @@ class AgentLoop:
         stop_tool_names: list[str] | None = None,
         on_plain_text: Any | None = None,
         channel_metadata: dict[str, Any] | None = None,
+        captured_turns: list[dict[str, Any]] | None = None,
+        tool_registry: ToolRegistry | None = None,
+        openviking_tool_names: list[str] | set[str] | None = None,
+        allow_final_fallback: bool = True,
+        inject_write_experience: bool = True,
+        skill_runtime: Any | None = None,
     ) -> tuple[str | None, str | None, list[dict], dict[str, int], int]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -720,6 +949,7 @@ class AgentLoop:
             messages: Initial message list
             session_key: Session key for tool execution context
             publish_events: Whether to publish ITERATION/REASONING/TOOL_CALL events to the bus
+            sender_id: Sender identity forwarded to the tool execution context
             actor_peer_id: Authenticated OpenViking peer identity for tools
             ov_tools_enable: Whether to enable OpenViking tools for this session
             memory_peer_ids: List of peer IDs for memory retrieval
@@ -735,11 +965,27 @@ class AgentLoop:
                 None, plain text is treated as the final assistant reply (default chatbot
                 semantics).
             channel_metadata: Channel-specific metadata for tools that publish outbound messages
+            captured_turns: Optional mutable list populated with each intermediate assistant
+                turn and the tool calls/results produced by that same model response. Reasoning
+                content is intentionally excluded.
+            tool_registry: Optional request-scoped registry used for tool definitions and
+                execution. Defaults to the agent's shared tool registry.
+            openviking_tool_names: Optional collection of tool names allowed to receive the
+                request-scoped OpenViking connection. None preserves the legacy behavior of
+                forwarding the connection to all tools; an empty collection forwards it to none.
+            allow_final_fallback: Whether to make a final tool-free LLM call after the
+                tool-use iteration limit is reached.
+            inject_write_experience: Whether to retrieve and inject relevant agent experience
+                before executing configured write tools.
 
         Returns:
             tuple of (final_content, final_reasoning_content, tools_used, token_usage, iteration)
         """
         iteration = 0
+        active_tools = tool_registry or self.tools
+        scoped_openviking_tools = (
+            set(openviking_tool_names) if openviking_tool_names is not None else None
+        )
         final_content = None
         final_reasoning_content = None
         tools_used: list[dict] = []
@@ -771,10 +1017,16 @@ class AgentLoop:
                     )
                 )
 
-            tool_definitions = self.tools.get_definitions(
+            tool_definitions = active_tools.get_definitions(
                 ov_tools_enable=ov_tools_enable,
                 disabled_tools=disabled_tools,
+                skill_runtime=skill_runtime,
             )
+            visible_tool_names = {
+                str(definition.get("function", {}).get("name") or "")
+                for definition in tool_definitions
+                if isinstance(definition, dict)
+            }
             response, _streamed_content, streamed_reasoning = await self._chat_with_stream_events(
                 messages=messages,
                 tools=tool_definitions,
@@ -794,7 +1046,7 @@ class AgentLoop:
 
             if response.has_tool_calls:
                 # Inject experience memory before write-related tool calls (once per session)
-                if not write_exp_injected:
+                if inject_write_experience and not write_exp_injected:
                     _ov_cfg = self.config.ov_server
                     _write_tools = set(_ov_cfg.exp_write_tools)
                     if any(tc.name in _write_tools for tc in response.tool_calls):
@@ -851,33 +1103,63 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
 
-                # Stage 2: Execute all tools in parallel
-                async def execute_single_tool(idx: int, tool_call):
+                # Stage 2: activate Skills first, then execute remaining tools.
+                async def execute_single_tool(
+                    idx: int, tool_call, allowed_names=visible_tool_names
+                ):
                     """Execute a single tool and track execution time."""
                     tool_execute_start_time = time.time()
-                    result = await self.tools.execute(
-                        tool_call.name,
-                        tool_call.arguments,
-                        session_key=session_key,
-                        sandbox_manager=self.sandbox_manager,
-                        sender_id=sender_id,
-                        actor_peer_id=actor_peer_id or sender_id,
-                        memory_peer_ids=memory_peer_ids,
-                        memory_owner_user_ids=memory_owner_user_ids,
-                        openviking_connection=openviking_connection,
-                        channel_metadata=channel_metadata,
+                    if tool_call.name not in allowed_names:
+                        result = f"Error: Tool '{tool_call.name}' is not available in this turn"
+                        return (
+                            idx,
+                            tool_call,
+                            ToolExecutionResult(
+                                result=result,
+                                effective_params=dict(tool_call.arguments),
+                            ),
+                            0.0,
+                        )
+                    tool_connection = (
+                        openviking_connection
+                        if scoped_openviking_tools is None
+                        or tool_call.name in scoped_openviking_tools
+                        else None
                     )
+                    execute_kwargs = {
+                        "session_key": session_key,
+                        "sandbox_manager": self.sandbox_manager,
+                        "sender_id": sender_id,
+                        "actor_peer_id": actor_peer_id or sender_id,
+                        "memory_peer_ids": memory_peer_ids,
+                        "memory_owner_user_ids": memory_owner_user_ids,
+                        "openviking_connection": tool_connection,
+                        "channel_metadata": channel_metadata,
+                    }
+                    if hasattr(active_tools, "execute_detailed"):
+                        outcome = await active_tools.execute_detailed(
+                            tool_call.name,
+                            tool_call.arguments,
+                            **execute_kwargs,
+                            skill_runtime=skill_runtime,
+                        )
+                    else:
+                        # Keep compatibility with embedders/tests that provide a
+                        # minimal registry implementing only the legacy API.
+                        result = await active_tools.execute(
+                            tool_call.name, tool_call.arguments, **execute_kwargs
+                        )
+                        outcome = ToolExecutionResult(
+                            result=result,
+                            effective_params=dict(tool_call.arguments),
+                        )
                     tool_execute_duration = (time.time() - tool_execute_start_time) * 1000
-                    return idx, tool_call, result, tool_execute_duration
+                    return idx, tool_call, outcome, tool_execute_duration
 
-                # Run all tool executions in parallel
-                tool_tasks = [
-                    execute_single_tool(idx, tool_call)
-                    for idx, tool_call in enumerate(response.tool_calls)
-                ]
-                if publish_events:
-                    for tool_call in response.tool_calls:
-                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                for tool_call in response.tool_calls:
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"[TOOL_CALL]: {tool_call.name}({args_str[:200]})")
+                    if publish_events:
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 session_key=session_key,
@@ -885,12 +1167,75 @@ class AgentLoop:
                                 event_type=OutboundEventType.TOOL_CALL,
                             )
                         )
-                results = await asyncio.gather(*tool_tasks)
+
+                indexed_calls = list(enumerate(response.tool_calls))
+                activation_calls = []
+                regular_calls = []
+                for indexed_call in indexed_calls:
+                    _index, candidate_call = indexed_call
+                    if skill_runtime is not None and skill_runtime.is_activation_call(
+                        candidate_call.name, candidate_call.arguments
+                    ):
+                        activation_calls.append(indexed_call)
+                    else:
+                        regular_calls.append(indexed_call)
+
+                # Complete Skill activation first. Calls emitted from the pre-activation
+                # schema are never executed under the newly activated policy; the model
+                # retries them on the next iteration with refreshed tool definitions.
+                activation_results = await asyncio.gather(
+                    *(execute_single_tool(index, call) for index, call in activation_calls)
+                )
+                activation_failed = any(
+                    not _is_tool_result_success(item[2].result)
+                    or not skill_runtime.activation_succeeded(item[1].arguments)
+                    for item in activation_results
+                )
+                if activation_failed:
+                    regular_results = [
+                        (
+                            index,
+                            call,
+                            ToolExecutionResult(
+                                result=(
+                                    "Error: SKILL_ACTIVATION_FAILED: execution was blocked "
+                                    "because a Skill definition in this tool batch could not "
+                                    "be activated"
+                                ),
+                                effective_params=dict(call.arguments),
+                            ),
+                            0.0,
+                        )
+                        for index, call in regular_calls
+                    ]
+                elif activation_calls:
+                    regular_results = [
+                        (
+                            index,
+                            call,
+                            ToolExecutionResult(
+                                result=(
+                                    "Error: SKILL_CONTEXT_UPDATED: one or more remote Skills "
+                                    "were activated; retry this tool call using the refreshed "
+                                    "tool definitions"
+                                ),
+                                effective_params=dict(call.arguments),
+                            ),
+                            0.0,
+                        )
+                        for index, call in regular_calls
+                    ]
+                else:
+                    regular_results = await asyncio.gather(
+                        *(execute_single_tool(index, call) for index, call in regular_calls)
+                    )
+                results = sorted([*activation_results, *regular_results], key=lambda item: item[0])
 
                 # Stage 3: Process results sequentially in original order
-                for _idx, tool_call, result, tool_execute_duration in results:
+                turn_tools: list[dict[str, Any]] = []
+                for _idx, tool_call, outcome, tool_execute_duration in results:
+                    result = outcome.result
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"[TOOL_CALL]: {tool_call.name}({args_str[:200]})")
                     logger.info(f"[RESULT]: {str(result)[:600]}")
 
                     if publish_events:
@@ -906,18 +1251,35 @@ class AgentLoop:
                     )
 
                     tool_used_dict = {
+                        "tool_call_id": tool_call.id,
                         "tool_name": tool_call.name,
                         "args": args_str,
+                        "resolved_args": outcome.effective_params,
                         "result": result,
                         "duration": tool_execute_duration,
                         "execute_success": _is_tool_result_success(result),
                         "input_token": tool_call.tokens,
                         "output_token": cal_str_tokens(result, text_type="mixed"),
                     }
+                    if outcome.skill_uris:
+                        tool_used_dict["skill_uri"] = outcome.skill_uris[0]
+                        tool_used_dict["skill_uris"] = list(outcome.skill_uris)
                     tools_used.append(tool_used_dict)
+                    turn_tools.append(tool_used_dict)
+
+                if captured_turns is not None:
+                    captured_turns.append(
+                        {
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": turn_tools,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
 
                 if any(
-                    tool_call.name in stop_tools for _idx, tool_call, _result, _duration in results
+                    tool_call.name in stop_tools and _is_tool_result_success(_outcome.result)
+                    for _idx, tool_call, _outcome, _duration in results
                 ):
                     final_content = ""
                     break
@@ -937,7 +1299,7 @@ class AgentLoop:
                                 text=text,
                                 reasoning_content=response.reasoning_content,
                                 iteration=iteration,
-                                tools=self.tools,
+                                tools=active_tools,
                                 sandbox_manager=self.sandbox_manager,
                                 sender_id=sender_id,
                                 memory_peer_ids=memory_peer_ids,
@@ -953,6 +1315,15 @@ class AgentLoop:
                     if isinstance(route, _PlainTextDelivered):
                         messages = route.messages
                         tools_used.extend(route.tools_used)
+                        if captured_turns is not None:
+                            captured_turns.append(
+                                {
+                                    "role": "assistant",
+                                    "content": text,
+                                    "tool_calls": list(route.tools_used),
+                                    "timestamp": datetime.now().isoformat(),
+                                }
+                            )
                         if route.user_terminates:
                             final_content = ""
                             break
@@ -980,7 +1351,7 @@ class AgentLoop:
         elif final_content is None or (
             isinstance(final_content, str) and not final_content.strip()
         ):
-            if iteration >= self.max_iterations:
+            if iteration >= self.max_iterations and allow_final_fallback:
                 messages.append(
                     {
                         "role": "user",
@@ -1026,6 +1397,57 @@ class AgentLoop:
                 final_content = "I've completed processing but have no response to give."
 
         return final_content, final_reasoning_content, tools_used, token_usage, iteration
+
+    async def run_structured_task(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        session_key: SessionKey,
+        tool_registry: ToolRegistry,
+        openviking_tool_names: list[str] | set[str],
+        stop_tool_names: list[str],
+        openviking_connection: dict[str, Any] | None,
+    ) -> tuple[Any, list[dict], dict[str, int], int]:
+        """Run a tool-terminated structured task through the existing agent loop."""
+
+        async def require_submission(context: _PlainTextContext) -> _PlainTextDelivered:
+            messages = self.context.add_assistant_message(context.messages, context.text, [])
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your response was not submitted. Continue the task and call "
+                        "submit_wiki_bundle with the complete final bundle."
+                    ),
+                }
+            )
+            return _PlainTextDelivered(messages=messages, tools_used=[])
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        _content, _reasoning, tools_used, token_usage, iteration = await self._run_agent_loop(
+            messages=messages,
+            session_key=session_key,
+            publish_events=False,
+            ov_tools_enable=True,
+            openviking_connection=openviking_connection,
+            stop_tool_names=stop_tool_names,
+            on_plain_text=require_submission,
+            tool_registry=tool_registry,
+            openviking_tool_names=openviking_tool_names,
+            allow_final_fallback=False,
+            inject_write_experience=False,
+        )
+        submit_tool = tool_registry.get("submit_wiki_bundle")
+        bundle = getattr(submit_tool, "bundle", None)
+        if bundle is None:
+            if iteration >= self.max_iterations:
+                raise AgentIterationLimitExceeded(self.max_iterations)
+            raise ValueError("AGENT_OUTPUT_INVALID: Agent did not submit a valid Wiki bundle")
+        return bundle, tools_used, token_usage, iteration
 
     @trace(
         name="process_message",
@@ -1080,6 +1502,7 @@ class AgentLoop:
                             logger.debug(f"Failed to send processing tick: {e}")
 
         monitor_task = asyncio.create_task(check_long_running())
+        skill_runtime: SkillRuntimeContext | None = None
 
         try:
             if msg.session_key.type == "system":
@@ -1151,7 +1574,7 @@ class AgentLoop:
                 if self._ov_session_context_enabled():
                     committed = await self._commit_openviking_session(
                         session,
-                        keep_recent_count=0,
+                        keep_recent_turn_count=0,
                         clear_local_session=True,
                         openviking_connection=openviking_connection,
                     )
@@ -1186,7 +1609,7 @@ class AgentLoop:
                 if self._ov_session_context_enabled():
                     remembered = await self._commit_openviking_session(
                         session,
-                        keep_recent_count=self.config.agents.commit_keep_recent_count,
+                        keep_recent_turn_count=self.config.agents.commit_keep_recent_turn_count,
                         openviking_connection=openviking_connection,
                     )
                     if not remembered:
@@ -1255,6 +1678,19 @@ class AgentLoop:
             else:
                 message_workspace = self.workspace
 
+            skill_runtime = self._create_skill_runtime(
+                session_key=session_key,
+                workspace=message_workspace,
+                ov_tools_enable=ov_tools_enable,
+                disabled_tools=disabled_tools,
+                openviking_connection=openviking_connection,
+                actor_peer_id=actor_peer_id,
+            )
+            remote_skills_summary = ""
+            if skill_runtime is not None:
+                await skill_runtime.discover(msg.content)
+                remote_skills_summary = skill_runtime.build_discovery_summary()
+
             from vikingbot.agent.context import ContextBuilder
 
             message_context = ContextBuilder(
@@ -1266,6 +1702,7 @@ class AgentLoop:
                 is_group_chat=is_group_chat,
                 eval=self._eval,
                 openviking_connection=openviking_connection,
+                remote_skills_summary=remote_skills_summary,
                 enable_subagents=self._subagents_enabled(),
                 config=self.config,
             )
@@ -1318,6 +1755,7 @@ class AgentLoop:
 
             # Run agent loop within a stable response identity for tracing/tool spans.
             response_id = uuid.uuid4().hex
+            agent_turns: list[dict[str, Any]] = []
             with set_response_id(response_id):
                 (
                     final_content,
@@ -1337,6 +1775,8 @@ class AgentLoop:
                     disabled_tools=disabled_tools,
                     openviking_connection=openviking_connection,
                     channel_metadata=msg.metadata,
+                    captured_turns=agent_turns,
+                    skill_runtime=skill_runtime,
                 )
 
             if auto_memory_tool:
@@ -1377,6 +1817,7 @@ class AgentLoop:
                     token_usage=token_usage,
                     sender_id=msg.sender_id,
                     reasoning_content=final_reasoning_content,
+                    agent_turns=agent_turns if agent_turns else None,
                 )
                 session.metadata.setdefault("response_facts", {})[response_id] = response_completed
                 await self.sessions.save(session)
@@ -1412,6 +1853,11 @@ class AgentLoop:
                 tools_used_names=response_completed["tools_used_names"],
             )
         finally:
+            if skill_runtime is not None:
+                try:
+                    await skill_runtime.close()
+                except Exception as exc:
+                    logger.warning("Failed to close remote Skill runtime: {}", exc)
             long_running_notified = True
             monitor_task.cancel()
             try:
@@ -1564,6 +2010,40 @@ class AgentLoop:
         channel_config = self._get_channel_config(session_key)
         return getattr(channel_config, "ov_tools_enable", True) if channel_config else True
 
+    def _create_skill_runtime(
+        self,
+        *,
+        session_key: SessionKey,
+        workspace: Path,
+        ov_tools_enable: bool,
+        disabled_tools: list[str] | None,
+        openviking_connection: dict[str, Any] | None,
+        actor_peer_id: str | None,
+    ) -> SkillRuntimeContext | None:
+        if (
+            self.config is None
+            or not ov_tools_enable
+            or not self.config.ov_server.is_available()
+            or not self.tools.has("openviking_multi_read")
+            or "openviking_multi_read" in set(disabled_tools or ())
+        ):
+            return None
+        local_skills = SkillsLoader(workspace).list_skills(filter_unavailable=False)
+        workspace_id = (
+            self.sandbox_manager.to_workspace_id(session_key)
+            if self.sandbox_manager
+            else session_key.safe_name()
+        )
+        return SkillRuntimeContext(
+            config=self.config,
+            session_key=session_key,
+            sandbox_manager=self.sandbox_manager,
+            workspace_id=workspace_id,
+            openviking_connection=openviking_connection,
+            actor_peer_id=actor_peer_id,
+            local_skill_names=(skill["name"] for skill in local_skills),
+        )
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
@@ -1616,6 +2096,7 @@ class AgentLoop:
         )
 
         # Run agent loop (no events published)
+        agent_turns: list[dict[str, Any]] = []
         (
             final_content,
             final_reasoning_content,
@@ -1632,6 +2113,7 @@ class AgentLoop:
             memory_peer_ids=None,
             openviking_connection=msg.openviking_connection,
             channel_metadata=msg.metadata,
+            captured_turns=agent_turns,
         )
 
         if final_content is None or (isinstance(final_content, str) and not final_content.strip()):
@@ -1644,6 +2126,7 @@ class AgentLoop:
             final_content,
             tools_used=tools_used if tools_used else None,
             reasoning_content=final_reasoning_content,
+            agent_turns=agent_turns if agent_turns else None,
         )
         await self.sessions.save(session)
 

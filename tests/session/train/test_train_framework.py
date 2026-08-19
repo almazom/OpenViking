@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_fakes import InMemoryAGFS, fake_request_context
+from test_fakes import fake_request_context
 
 from openviking.message import Message, TextPart
 from openviking.session.memory.dataclass import StoredLink
@@ -34,15 +34,6 @@ from openviking.session.train import (
     Trajectory,
 )
 from openviking.session.train.components.reporter import ConsolePipelineReporter
-from openviking.storage.transaction import init_lock_manager, reset_lock_manager
-
-
-@pytest.fixture(autouse=True)
-def _train_lock_manager():
-    reset_lock_manager()
-    init_lock_manager(InMemoryAGFS(), redo_recovery_enabled=False)
-    yield
-    reset_lock_manager()
 
 
 def _case() -> Case:
@@ -463,7 +454,9 @@ async def test_training_updates_execution_metadata_epoch_each_epoch():
         policy_optimizer=DummyOptimizer(),
         policy_updater=DummyUpdater(),
     )
-    context = PipelineContext(max_epochs=2, execution_metadata={"rollout_stage": "eval_train_rollout"})
+    context = PipelineContext(
+        max_epochs=2, execution_metadata={"rollout_stage": "eval_train_rollout"}
+    )
 
     result = await pipeline.train(
         case_loader=ListCaseLoader([_case()]),
@@ -499,9 +492,10 @@ async def test_train_runs_test_eval_after_each_epoch_when_configured():
 
     assert [item.epoch for item in result.evaluation_passes] == [0, 1]
     assert result.metadata["evaluation_pass_count"] == 2
-    assert [
-        item.metadata.get("rollout_stage") for item in result.evaluation_passes
-    ] == ["test_rollout", "test_rollout"]
+    assert [item.metadata.get("rollout_stage") for item in result.evaluation_passes] == [
+        "test_rollout",
+        "test_rollout",
+    ]
     assert [item.metadata.get("eval_split") for item in result.evaluation_passes] == [
         "test",
         "test",
@@ -552,6 +546,7 @@ async def test_offline_policy_optimization_pipeline_epoch_hook_can_stop_training
         policy_optimizer=DummyOptimizer(),
         policy_updater=DummyUpdater(),
     )
+
     class StopTrainingHook(NoopPipelineLifecycleHook):
         def __init__(self):
             self.epochs: list[int] = []
@@ -750,81 +745,6 @@ async def test_batch_policy_trainer_trains_from_rollout_batch():
 
 
 @pytest.mark.asyncio
-async def test_streaming_policy_trainer_flushes_on_gradient_count():
-    from openviking.session.train import (
-        PolicyPlanItem,
-        StreamingPolicyTrainer,
-        StreamingPolicyTrainerConfig,
-    )
-
-    class LinkingOptimizer(DummyOptimizer):
-        async def plan(self, gradients, policy_set, context):
-            del policy_set, context
-            return PolicyUpdatePlan(
-                items=[
-                    PolicyPlanItem(
-                        kind="upsert",
-                        memory_type="experiences",
-                        target_name=f"exp_{idx}",
-                        target_uri=f"viking://user/u/memories/experiences/exp_{idx}.md",
-                        before_content=None,
-                        after_content=f"content {idx}",
-                        links=list(gradient.links),
-                    )
-                    for idx, gradient in enumerate(gradients)
-                ],
-                metadata={"gradient_count": len(gradients)},
-            )
-
-    trainer = StreamingPolicyTrainer(
-        policy_set=_policy_set(),
-        rollout_analyzer=DummyAnalyzer(),
-        gradient_estimator=DummyEstimator(),
-        policy_optimizer=LinkingOptimizer(),
-        policy_updater=DummyUpdater(),
-        context=PipelineContext(),
-        config=StreamingPolicyTrainerConfig(
-            max_gradients_per_update=2,
-            max_wait_seconds=60.0,
-            timer_check_interval_seconds=60.0,
-        ),
-    )
-    rollout1 = Rollout(
-        case=_case(),
-        messages=[Message(id="s1", role="user", parts=[TextPart(text="first")])],
-        policy_snapshot_id="snapshot-1",
-    )
-    rollout2 = Rollout(
-        case=_case(),
-        messages=[Message(id="s2", role="user", parts=[TextPart(text="second")])],
-        policy_snapshot_id="snapshot-1",
-    )
-
-    first, second = await asyncio.gather(
-        trainer.submit_rollout(rollout1),
-        trainer.submit_rollout(rollout2),
-    )
-    assert first is not second
-    assert first.batch_result is second.batch_result
-    assert len(first.analyses) == 1
-    assert len(second.analyses) == 1
-    assert [analysis.trajectories[0].uri for analysis in first.analyses] == [
-        "viking://user/u/memories/trajectories/duplicate_booking.md"
-    ]
-    assert len(first.plan.items) == 2
-    assert len(second.plan.items) == 2
-    assert second.metadata["flush_reason"] == "count"
-    assert second.metadata["gradient_count"] == 1
-    assert second.metadata["batch_gradient_count"] == 2
-    assert second.apply_result.updated_policy_set.policies[0].version == 2
-    assert await trainer.get_buffered_gradient_count() == 0
-    assert trainer.last_apply_result is second.batch_result.apply_result
-
-    assert await trainer.close() is None
-    assert trainer.closed is True
-
-
-@pytest.mark.asyncio
 async def test_streaming_policy_trainer_scopes_concurrent_submit_results_by_source_trajectory():
     from openviking.session.train import (
         PolicyPlanItem,
@@ -946,11 +866,93 @@ async def test_streaming_policy_trainer_scopes_concurrent_submit_results_by_sour
     assert {item.target_name for item in first.batch_result.plan.items} == {"case_a", "case_b"}
     assert [item.target_name for item in first.plan.items] == ["case_a"]
     assert [item.target_name for item in second.plan.items] == ["case_b"]
-    assert first.apply_result.written_uris == [
-        "viking://user/u/memories/experiences/case_a.md"
-    ]
-    assert second.apply_result.written_uris == [
-        "viking://user/u/memories/experiences/case_b.md"
+    assert first.apply_result.written_uris == ["viking://user/u/memories/experiences/case_a.md"]
+    assert second.apply_result.written_uris == ["viking://user/u/memories/experiences/case_b.md"]
+
+    assert await trainer.close() is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_policy_trainer_finalizes_snapshot_before_next_flush_writes():
+    from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
+
+    writes: list[str] = []
+    snapshots: list[tuple[str, list[str], list[str]]] = []
+    first_finalizer_started = asyncio.Event()
+    release_first_finalizer = asyncio.Event()
+
+    class RecordingCore:
+        async def plan_and_apply(self, *, gradients, policy_set, ctx):
+            del ctx
+            uris = [gradient.target_uri for gradient in gradients]
+            writes.extend(uris)
+            return (
+                PolicyUpdatePlan(metadata={"uris": uris}),
+                PolicyApplyResult(updated_policy_set=policy_set, written_uris=uris),
+            )
+
+    trainer = StreamingPolicyTrainer(
+        policy_set=_policy_set(),
+        rollout_analyzer=DummyAnalyzer(),
+        gradient_estimator=DummyEstimator(),
+        policy_optimizer=DummyOptimizer(),
+        policy_updater=DummyUpdater(),
+        context=PipelineContext(),
+        config=StreamingPolicyTrainerConfig(
+            max_gradients_per_update=1,
+            max_wait_seconds=60.0,
+            timer_check_interval_seconds=60.0,
+        ),
+    )
+    trainer._core = RecordingCore()
+
+    async def finalize_first(result):
+        first_finalizer_started.set()
+        await release_first_finalizer.wait()
+        snapshots.append(("first", list(writes), list(result.apply_result.written_uris)))
+
+    async def finalize_second(result):
+        snapshots.append(("second", list(writes), list(result.apply_result.written_uris)))
+
+    def gradient(name: str) -> DummyGradient:
+        uri = f"viking://user/u/memories/experiences/{name}.md"
+        return DummyGradient(
+            target_name=name,
+            target_uri=uri,
+            base_version=None,
+            rationale="test",
+            links=[],
+            confidence=1.0,
+        )
+
+    first_task = asyncio.create_task(
+        trainer.submit_gradients([gradient("exp_a")], batch_finalizer=finalize_first)
+    )
+    await first_finalizer_started.wait()
+    second_task = asyncio.create_task(
+        trainer.submit_gradients([gradient("exp_b")], batch_finalizer=finalize_second)
+    )
+    await asyncio.sleep(0)
+
+    assert writes == ["viking://user/u/memories/experiences/exp_a.md"]
+
+    release_first_finalizer.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert snapshots == [
+        (
+            "first",
+            ["viking://user/u/memories/experiences/exp_a.md"],
+            ["viking://user/u/memories/experiences/exp_a.md"],
+        ),
+        (
+            "second",
+            [
+                "viking://user/u/memories/experiences/exp_a.md",
+                "viking://user/u/memories/experiences/exp_b.md",
+            ],
+            ["viking://user/u/memories/experiences/exp_b.md"],
+        ),
     ]
 
     assert await trainer.close() is None
@@ -1159,84 +1161,6 @@ async def test_streaming_policy_trainer_mixes_categories_in_chunks():
 
 
 @pytest.mark.asyncio
-async def test_streaming_policy_trainer_flushes_on_timer():
-    from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
-
-    trainer = StreamingPolicyTrainer(
-        policy_set=_policy_set(),
-        rollout_analyzer=DummyAnalyzer(),
-        gradient_estimator=DummyEstimator(),
-        policy_optimizer=DummyOptimizer(),
-        policy_updater=DummyUpdater(),
-        context=PipelineContext(),
-        config=StreamingPolicyTrainerConfig(
-            max_gradients_per_update=10,
-            max_wait_seconds=0.01,
-            timer_check_interval_seconds=0.01,
-        ),
-    )
-    rollout = Rollout(
-        case=_case(),
-        messages=[Message(id="timer", role="user", parts=[TextPart(text="timer")])],
-        policy_snapshot_id="snapshot-1",
-    )
-
-    result = await trainer.submit_rollout(rollout)
-    assert result is not None
-    assert result.metadata["flush_reason"] == "time"
-    assert result.metadata["gradient_count"] == 1
-    assert trainer.last_apply_result is not None
-    assert trainer.last_apply_result.updated_policy_set.policies[0].version == 2
-    assert await trainer.get_buffered_gradient_count() == 0
-
-    assert await trainer.close() is None
-    assert trainer.closed is True
-
-
-@pytest.mark.asyncio
-async def test_streaming_policy_trainer_close_flushes_buffer_and_rejects_submit():
-    from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
-
-    trainer = StreamingPolicyTrainer(
-        policy_set=_policy_set(),
-        rollout_analyzer=DummyAnalyzer(),
-        gradient_estimator=DummyEstimator(),
-        policy_optimizer=DummyOptimizer(),
-        policy_updater=DummyUpdater(),
-        context=PipelineContext(),
-        config=StreamingPolicyTrainerConfig(
-            max_gradients_per_update=10,
-            max_wait_seconds=0.01,
-            timer_check_interval_seconds=0.01,
-        ),
-    )
-    rollout = Rollout(
-        case=_case(),
-        messages=[Message(id="close", role="user", parts=[TextPart(text="close")])],
-        policy_snapshot_id="snapshot-1",
-    )
-
-    submit_task = asyncio.create_task(trainer.submit_rollout(rollout))
-    await asyncio.sleep(0)
-    assert await trainer.get_buffered_gradient_count() == 1
-
-    result = await trainer.close()
-
-    assert result is not None
-    assert result.metadata["flush_reason"] == "close"
-    assert result.metadata["gradient_count"] == 1
-    submit_result = await submit_task
-    assert submit_result.batch_result is result
-    assert trainer.closed is True
-    assert await trainer.get_buffered_gradient_count() == 0
-    assert trainer.last_apply_result is result.apply_result
-    assert await trainer.close() is None
-
-    with pytest.raises(RuntimeError, match="closed"):
-        await trainer.submit_rollout(rollout)
-
-
-@pytest.mark.asyncio
 async def test_get_streaming_policy_trainer_returns_process_global_instance():
     from openviking.session.train import (
         StreamingPolicyTrainerConfig,
@@ -1273,6 +1197,7 @@ async def test_get_streaming_policy_trainer_returns_process_global_instance():
 
     assert second is first
     assert first.config.max_gradients_per_update == 3
+
 
 class FakeSessionCommitClient:
     def __init__(self):
@@ -1732,12 +1657,7 @@ def test_rollout_artifact_event_recorder_enriches_commit_result(tmp_path):
         / "trial_0"
     )
     commit_dir = (
-        tmp_path
-        / "rollouts"
-        / "airline_train_task_7_task-7"
-        / "epoch_0"
-        / "2.train"
-        / "trial_0"
+        tmp_path / "rollouts" / "airline_train_task_7_task-7" / "epoch_0" / "2.train" / "trial_0"
     )
     assert not (rollout_dir / "commit_result.json").exists()
     commit_result = json.loads((commit_dir / "commit_result.json").read_text())
@@ -1761,22 +1681,22 @@ async def test_rollout_artifact_recorder_writes_epoch_commit_artifacts_under_com
     class CommitArtifactClient:
         async def read(self, uri):
             assert uri == "viking://archive/memory_diff.json"
-            return json.dumps({
-                "operations": {
-                    "adds": [
-                        {"uri": "viking://memory/new.md", "after": "# New\nbody"}
-                    ],
-                    "updates": [
-                        {
-                            "uri": "viking://memory/old.md",
-                            "before": "# Old\nbody",
-                            "after": "# Old\nnew body",
-                        }
-                    ],
-                    "deletes": [],
-                },
-                "summary": {"total_adds": 1, "total_updates": 1, "total_deletes": 0},
-            })
+            return json.dumps(
+                {
+                    "operations": {
+                        "adds": [{"uri": "viking://memory/new.md", "after": "# New\nbody"}],
+                        "updates": [
+                            {
+                                "uri": "viking://memory/old.md",
+                                "before": "# Old\nbody",
+                                "after": "# Old\nnew body",
+                            }
+                        ],
+                        "deletes": [],
+                    },
+                    "summary": {"total_adds": 1, "total_updates": 1, "total_deletes": 0},
+                }
+            )
 
     recorder = RolloutArtifactRecorder(run_dir=tmp_path, client=CommitArtifactClient())
     case = Case(
@@ -1824,12 +1744,7 @@ async def test_rollout_artifact_recorder_writes_epoch_commit_artifacts_under_com
         / "trial_0"
     )
     commit_dir = (
-        tmp_path
-        / "rollouts"
-        / "airline_train_task_7_task-7"
-        / "epoch_0"
-        / "2.train"
-        / "trial_0"
+        tmp_path / "rollouts" / "airline_train_task_7_task-7" / "epoch_0" / "2.train" / "trial_0"
     )
     assert (train_dir / "status.json").exists()
     assert not (train_dir / "commit_result.json").exists()

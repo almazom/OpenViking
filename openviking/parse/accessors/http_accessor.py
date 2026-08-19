@@ -98,7 +98,6 @@ class URLTypeDetector:
         **dict.fromkeys(VIDEO_EXTENSIONS, URLType.DOWNLOAD_VIDEO),
         **dict.fromkeys(DOCUMENT_EXTENSIONS, URLType.DOWNLOAD_DOCUMENT),
     }
-
     # === IANA Media Type to URL type mapping ===
     # Maps IANA registered media types to our internal URLType
     # Patterns can be:
@@ -295,9 +294,12 @@ class URLTypeDetector:
         media_type_str = content_type.lower().strip()
 
         # Handle common aliases
-        if media_type_str in MEDIA_TYPE_ALIASES:
-            meta["media_type_alias"] = media_type_str
-            media_type_str = MEDIA_TYPE_ALIASES[media_type_str]
+        media_type_token = media_type_str.split(";", 1)[0].strip()
+        if media_type_token in MEDIA_TYPE_ALIASES:
+            meta["media_type_alias"] = media_type_token
+            media_type_str = (
+                MEDIA_TYPE_ALIASES[media_type_token] + media_type_str[len(media_type_token) :]
+            )
 
         # Parse into structured IANAMediaType
         try:
@@ -643,7 +645,10 @@ class HTTPAccessor(DataAccessor):
             get_meta,
             detected_by_prefix="get_",
         )
-        if get_url_type != URLType.UNKNOWN and self._should_refine_url_type(url_type, get_url_type):
+        if get_url_type != URLType.UNKNOWN and self._should_refine_url_type(
+            url_type,
+            get_url_type,
+        ):
             url_type = get_url_type
             meta.update(get_meta)
             meta["refined_by_get_headers"] = True
@@ -684,7 +689,10 @@ class HTTPAccessor(DataAccessor):
         return meta
 
     @staticmethod
-    def _should_refine_url_type(current: URLType, candidate: URLType) -> bool:
+    def _should_refine_url_type(
+        current: URLType,
+        candidate: URLType,
+    ) -> bool:
         """Only replace ambiguous/default webpage guesses with file types."""
         if candidate in (URLType.UNKNOWN, URLType.WEBPAGE):
             return False
@@ -726,6 +734,8 @@ class HTTPAccessor(DataAccessor):
                 return URLType.DOWNLOAD_VIDEO, ".avi"
         if sample.startswith(b"ID3") or sample.startswith(b"\xff\xfb"):
             return URLType.DOWNLOAD_AUDIO, ".mp3"
+        if sample.startswith(b"\x0b\x77"):
+            return URLType.DOWNLOAD_AUDIO, ".ac3"
         if len(sample) >= 12 and sample[4:8] == b"ftyp":
             brand = sample[8:12].lower()
             if brand in {b"qt  ", b"moov"}:

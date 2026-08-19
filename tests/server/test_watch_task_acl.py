@@ -4,7 +4,6 @@
 """Regression tests for watch-task control file access boundaries."""
 
 import contextvars
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -37,6 +36,11 @@ def bare_viking_fs() -> VikingFS:
     return fs
 
 
+class _NoWriteVikingFS:
+    async def _ensure_access(self, uri, ctx, *, action):
+        raise AssertionError(f"write access should not be reached for {uri}")
+
+
 @pytest.mark.parametrize(
     "uri",
     [
@@ -57,11 +61,8 @@ async def test_watch_task_control_files_are_root_only(bare_viking_fs, root_ctx, 
 async def test_hidden_listing_filters_watch_task_control_files_for_non_root(
     bare_viking_fs, root_ctx, user_ctx
 ):
-    bare_viking_fs._uri_to_path = lambda uri, ctx=None: "/fake/resources"
-    bare_viking_fs._ctx_or_default = lambda ctx=None: ctx
-
-    bare_viking_fs._ls_entries = AsyncMock(
-        return_value=[
+    async def ls_entries(path, ctx=None):
+        return [
             {
                 "name": ".watch_tasks.json",
                 "isDir": False,
@@ -87,7 +88,10 @@ async def test_hidden_listing_filters_watch_task_control_files_for_non_root(
                 "modTime": "2026-01-01T00:00:00+00:00",
             },
         ]
-    )
+
+    bare_viking_fs._uri_to_path = lambda uri, ctx=None: "/fake/resources"
+    bare_viking_fs._ctx_or_default = lambda ctx=None: ctx
+    bare_viking_fs._ls_entries = ls_entries
     bare_viking_fs._path_to_uri = lambda path, ctx=None: f"viking://resources/{path.split('/')[-1]}"
 
     root_entries = await bare_viking_fs._ls_original(
@@ -123,8 +127,26 @@ async def test_hidden_listing_filters_watch_task_control_files_for_non_root(
         WATCH_TASK_STORAGE_TMP_URI,
     ],
 )
-def test_content_write_rejects_watch_task_control_files(uri):
-    coordinator = object.__new__(ContentWriteCoordinator)
+async def test_content_write_rejects_watch_task_control_files(user_ctx, uri):
+    coordinator = ContentWriteCoordinator(_NoWriteVikingFS())
 
     with pytest.raises(InvalidArgumentError, match="watch task control file"):
-        coordinator._validate_target_uri(uri)
+        await coordinator.write(uri=uri, content="x", ctx=user_ctx)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "viking://resources//.watch_tasks.json",
+        "viking://resources//.watch_tasks.json.bak",
+        "viking://resources///.watch_tasks.json.tmp/",
+    ],
+)
+async def test_redundant_separator_aliases_cannot_bypass_watch_task_acl(
+    bare_viking_fs, user_ctx, uri
+):
+    assert bare_viking_fs._is_accessible(uri, user_ctx) is False
+
+    coordinator = ContentWriteCoordinator(_NoWriteVikingFS())
+    with pytest.raises(InvalidArgumentError, match="watch task control file"):
+        await coordinator.write(uri=uri, content="x", ctx=user_ctx)

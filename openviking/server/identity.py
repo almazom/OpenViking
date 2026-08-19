@@ -100,14 +100,14 @@ class RequestContext:
     # Request-level view filter for the current user's peers collection. This does
     # not change tenant/user identity or session ownership.
     actor_peer_id: Optional[str] = None
-    # Set only when the actor peer scope came from the historical
-    # X-OpenViking-Agent header.
-    legacy_agent_id: Optional[str] = None
     # Mirrors ResolvedIdentity.from_oauth. Routes that mint OAuth state
     # (OTP issuance, oauth-verify) reject callers with from_oauth=True to
     # prevent a stolen access token from laundering itself into a long-lived
     # refresh-token chain.
     from_oauth: bool = False
+    # Raw API key from the request — used by Connector to call back into OV
+    # on behalf of the original user
+    api_key: Optional[str] = field(default=None, repr=False)
 
     @property
     def account_id(self) -> str:

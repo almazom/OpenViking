@@ -12,7 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { loadConfig, type OVConfig } from "./config.js";
+import { loadConfigFromModuleUrl, type OVConfig } from "./config.js";
 import { OVClient } from "./client.js";
 import { RecallManager } from "./recall.js";
 import { SyncManager } from "./sync.js";
@@ -23,15 +23,15 @@ import { createTakeoverManager } from "./takeover.js";
 
 export default async function (pi: ExtensionAPI) {
   // --- Load config ---
-  const config = loadConfig(dirname(new URL(import.meta.url).pathname));
+  const config = loadConfigFromModuleUrl(import.meta.url);
   if (!config.enabled) return;
 
   // Env overrides
 
   // --- Initialize modules ---
   const client = new OVClient(config);
-  const recall = new RecallManager(client, config);
   const sync = new SyncManager(client, config);
+  const recall = new RecallManager(client, config, () => sync.sessionId);
   const debugLog = (message: string) => {
     const file = process.env.OV_DEBUG_LOG;
     if (!file) return;
@@ -137,8 +137,9 @@ export default async function (pi: ExtensionAPI) {
 
     if (!connected || bypassed) return;
 
-    // Synchronous recall
-    await recall.searchAndCache(event.prompt);
+    // Queue recall for the context hook. Pi renders the user message before
+    // that hook, so recall latency does not delay the message appearing.
+    recall.queueSearch(event.prompt);
 
     // Compose system prompt additions
     const parts: string[] = [];
@@ -159,6 +160,11 @@ export default async function (pi: ExtensionAPI) {
   // --- context ---
   pi.on("context", async (event, _ctx) => {
     if (!connected || bypassed) return;
+
+    // Keep recall synchronous with the provider request so the current prompt
+    // still receives current-query memory, without blocking user-message UI.
+    await recall.searchPending();
+
     const afterTakeover = config.takeoverEnabled
       ? takeover.transformContext(event.messages as any)
       : event.messages;
@@ -239,11 +245,16 @@ export default async function (pi: ExtensionAPI) {
 
       if (args?.trim() === "commit") {
         await sync.shutdown();
+        const commitResult = config.takeoverEnabled ? null : await sync.commit();
         const ok = config.takeoverEnabled
           ? await takeover.commitAndAdvance()
-          : (await sync.commit()) !== null;
+          : commitResult !== null;
         if (ok) {
-          ctx.ui.notify("OpenViking: committed successfully", "info");
+          ctx.ui.notify(
+            "OpenViking: committed successfully" +
+              (commitResult?.trace_id ? ` (trace_id=${commitResult.trace_id})` : ""),
+            "info",
+          );
         } else {
           ctx.ui.notify("OpenViking: commit failed", "error");
         }

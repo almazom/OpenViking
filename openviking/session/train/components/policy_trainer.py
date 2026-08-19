@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Hashable
 
@@ -178,11 +179,6 @@ class StreamingPolicyTrainer:
     def last_apply_result(self) -> PolicyApplyResult | None:
         return self._last_apply_result
 
-    async def get_buffered_gradient_count(self) -> int:
-        """Return the current buffered gradient count under the buffer lock."""
-
-        return await self._batcher.get_buffered_size()
-
     @property
     def closed(self) -> bool:
         return self._closed
@@ -255,6 +251,7 @@ class StreamingPolicyTrainer:
         *,
         analysis: RolloutAnalysis | None = None,
         rollout: Rollout | None = None,
+        batch_finalizer: Callable[[RolloutTrainingResult], Awaitable[None]] | None = None,
     ) -> RolloutTrainingResult | ScopedRolloutTrainingResult:
         """Submit pre-computed gradients directly to the streaming trainer.
 
@@ -288,6 +285,7 @@ class StreamingPolicyTrainer:
             gradients=list(gradients),
             analysis=analysis,
             rollout=rollout,
+            batch_finalizer=batch_finalizer,
         )
         result = await self._batcher.submit(buffered)
         self._last_apply_result = result.apply_result
@@ -381,6 +379,16 @@ class StreamingPolicyTrainer:
                 "flush_reason": reason,
             },
         )
+        # Finalize the persisted batch before StreamingBatcher releases its
+        # flush lock and starts another batch. All submitters in this flush
+        # share the same complete result, so one finalizer is sufficient.
+        # This keeps snapshot creation ordered with the writes it describes.
+        batch_finalizer = next(
+            (item.batch_finalizer for item in items if item.batch_finalizer is not None),
+            None,
+        )
+        if batch_finalizer is not None:
+            await batch_finalizer(result)
         tracer.info(
             "StreamingPolicyTrainer flush finished "
             f"reason={reason} "
@@ -599,6 +607,7 @@ class _BufferedRolloutTraining:
     gradients: list[SemanticGradient]
     analysis: RolloutAnalysis | None = None
     rollout: Rollout | None = None
+    batch_finalizer: Callable[[RolloutTrainingResult], Awaitable[None]] | None = None
 
 
 @dataclass(slots=True)

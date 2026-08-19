@@ -41,6 +41,7 @@ headers；即使宿主机已有 CUDA driver、但没有完整 toolkit，也建�
         "algorithm": "brute_force",
         "dtype": "float32",
         "max_concurrent_gpu_searches": 1,
+        "micro_batching_enabled": false,
         "fallback_to_native": true,
         "filter_cache_size": 16
       }
@@ -121,7 +122,14 @@ dense query 仍固定使用 cuVS。
 `auto_background_rebuild` 默认关闭。开启后，连续 mutation 会按
 `auto_rebuild_debounce_ms` 合并，worker 在不持有跨后端 mutation 锁的情况下构建
 新的 immutable GPU snapshot。默认 500 ms 用于避免普通 ingest 的中间 batch
-反复触发构建；batch 间隔更长的 bulk load 应配置更大的值。snapshot dirty 期间查询直接使用当前 native index，
+反复触发构建。对于边界明确、由多次调用组成的 bulk load，可把所有写入放在
+`async with backend.bulk_ingest(ctx=ctx):` scope 内：native 可见性和持久化仍按
+每次调用推进，但 derived GPU maintenance 会延迟到最外层 scope 退出后只调度一次。
+该 scope 只是 maintenance hint，不提供事务或原子性；退出 scope 只负责调度 rebuild，
+本身不等待 GPU ready。vector backend benchmark 会额外在正式计时 search 前显式等待
+最终 snapshot；无法识别 bulk 边界的调用方仍可按实际 batch 间隔调整 debounce。Auto
+仍为显式启用；未开启 Auto/background rebuild 时，该 scope 对派生维护为 no-op，不改变
+原生 CPU 检索、写入与 dtype 行为。snapshot dirty 期间查询直接使用当前 native index，
 不会把 GPU build 时间转化成请求排队时间。worker 只在 record generation 仍匹配时
 原子提交 label layout 和 GPU snapshot；过期 build 会被丢弃，并只重建最新一代。
 
@@ -179,10 +187,61 @@ truth 报告 Recall@K。与 native 兼容的 int8 仍需单独设计，因为 Op
 逐向量 scale，而 cuVS brute-force 不能直接接收这种 scaled-int8 表示。CAGRA
 int8 或 PQ compression 也应作为近似模式，单独报告 recall/latency/memory frontier。
 
-集成使用 immutable GPU snapshot 和每线程 cuVS resource/CUDA stream。host 侧
+集成使用 immutable GPU snapshot 和可复用的 cuVS resource/CUDA stream。host 侧
 filter 与 snapshot 工作可以并行，但 `max_concurrent_gpu_searches` 默认是 1：
 单 query brute-force 通常受显存带宽限制，并发 kernel 可能互相争抢带宽、反而降低
 吞吐。只有在目标 GPU 与真实 workload 上测得收益后，才建议显式调大该值。
+
+### 可选的请求微批处理
+
+精确 brute-force 路径可以把兼容的并发请求合并为一次 cuVS matrix-query 调用：
+
+```json
+{
+  "storage": {
+    "vectordb": {
+      "backend": "cuvs",
+      "cuvs": {
+        "algorithm": "brute_force",
+        "max_concurrent_gpu_searches": 1,
+        "micro_batching_enabled": true,
+        "micro_batching_max_batch_size": 8,
+        "micro_batching_max_wait_ms": 1.0
+      }
+    }
+  }
+}
+```
+
+scheduler 只会合并使用同一个 immutable GPU snapshot、同一个 prepared filter、
+同一个实际 top-k 的请求；GPU 返回的每一行会映射回原请求，因此标量/路径过滤和
+结果条数语义不变。
+
+当 immutable snapshot clean、属于当前 generation，且请求没有 filter 或命中已准备好的
+device filter cache 时，可走 warm admission fast path。该路径会 pin snapshot/filter，
+并在 caller 不获取 device-search gate 的情况下直接入队。dirty、cold 或 stale snapshot，
+device filter cache miss/eviction、rebuild 和 device filter materialization 仍走 gated
+preparation。准备完成后，caller 先入队并释放 gate，再等待结果；只有 micro-batch worker
+会在持有 device-search gate 时执行 matrix search，所以 caller 不会持 gate 等待 worker。
+
+collection window 是延迟与吞吐的权衡。它只限制 scheduler 为收集兼容请求而主动等待的
+时间：从最早的 compatible request 起最多主动等待配置值；它不是 enqueue-to-dispatch
+latency 上限。worker 调度、前一个 GPU call 或 gated device preparation 都可能使实际
+dispatch 更晚。并发充足时，最多由配置上限数量的 query 共用一次 GPU call。
+
+参数约束如下：
+
+- `micro_batching_max_batch_size` 范围为 1 到 8；
+- `micro_batching_max_wait_ms` 范围为 0 到 100 ms；设为 `0` 表示不主动等待，但仍可
+  opportunistically 合并已经同时在队列中的兼容请求；
+- micro-batching 仅支持 `algorithm: "brute_force"`，并要求
+  `max_concurrent_gpu_searches: 1`。
+
+该能力默认关闭，是 OpenViking 自己的 micro-batcher，不等同于 cuVS 官方名为
+Dynamic Batching 的组件。首版只支持 exact brute-force；CAGRA 和并发 dispatch 多个
+batch 会在独立验证后再开放。Auto 模式也可使用这些选项，但被路由到原生 CPU 的请求
+不会进入 GPU batch queue。single-row 与 matrix-query 在近似并列分数处可能有顺序
+差异，调参时应同时验证结果集合重合度和 score。
 
 ## 最小功能验证
 
@@ -253,7 +312,7 @@ collection.close()
 - local 集成通过 native scalar/path index 生成 prefilter，因此继承原生 DSL、`date_time`、`geo_point` 和 path depth 的过滤语义，而不是在 Python 重复实现。
 - 每次 GPU rebuild 会向 native engine 注册一次 cuVS label 顺序。新过滤条件直接复用 native scalar/path index 的 bitmap，再投影为 cuVS row bitset，不再用 Python 扫描所有 host-side records。
 - `filter_cache_size` 会保留最近使用的 GPU bitset 或 native 路由决策，并在数据更新时失效；auto 模式在进入 cuVS search 前预判候选数，不同的首次过滤条件可通过 native engine 的共享读路径并行计算，命中已缓存的 native 路由时则直接进入 native index。generation 校验会阻止跨 mutation 计算出的旧结果写入路由缓存。
-- GPU index 使用 immutable snapshot；warmed search 通过不同的 cuVS resources/CUDA stream 并发执行，mutation 和 snapshot commit 使用跨后端写锁。
+- GPU index 使用 immutable snapshot 和可复用的 cuVS resources/CUDA stream；默认关闭的 micro-batching 可让 compatible warm request 绕过 caller 侧 gate 入队，并由唯一持有 device-search gate 执行 matrix search 的 worker 合批。mutation 和 snapshot commit 使用跨后端写锁。
 - 默认情况下，每次 upsert/delete 后仍由下一次查询同步重建；开启 `auto_background_rebuild` 后，dirty 期间查询走 native，连续写被合并为后台重建。
 - cuVS 索引不作为权威持久化数据；进程重启时会从 OpenViking 本地 store 重建，因此不受 cuVS 跨版本序列化格式变化影响。
 - `brute_force` 适合功能对齐和 ground truth；CAGRA 的 graph/search 参数需要在后续结合召回率、QPS、延迟和显存进行调优。

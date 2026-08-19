@@ -62,24 +62,6 @@ async def mock_viking_fs(temp_storage: Path) -> MockVikingFS:
     return MockVikingFS(root_path=str(temp_storage))
 
 
-@pytest_asyncio.fixture
-async def watch_manager(mock_viking_fs: MockVikingFS) -> AsyncGenerator[WatchManager, None]:
-    """Create WatchManager instance with mock VikingFS."""
-    manager = WatchManager(viking_fs=mock_viking_fs)
-    await manager.initialize()
-    yield manager
-    await manager.clear_all_tasks()
-
-
-@pytest_asyncio.fixture
-async def watch_manager_no_fs() -> AsyncGenerator[WatchManager, None]:
-    """Create WatchManager instance without VikingFS."""
-    manager = WatchManager(viking_fs=None)
-    await manager.initialize()
-    yield manager
-    await manager.clear_all_tasks()
-
-
 class TestWatchTask:
     """Tests for WatchTask data model."""
 
@@ -98,6 +80,7 @@ class TestWatchTask:
         assert task.created_at is not None
         assert task.last_execution_time is None
         assert task.next_execution_time is None
+        assert task.processing_mode == "semantic_and_vectors"
 
     def test_create_task_with_all_fields(self):
         """Test creating a task with all fields specified."""
@@ -110,6 +93,7 @@ class TestWatchTask:
             reason="Test reason",
             instruction="Test instruction",
             watch_interval=30.0,
+            processing_mode="vectors_only",
             created_at=now,
             last_execution_time=now,
             next_execution_time=now + timedelta(minutes=30),
@@ -123,6 +107,7 @@ class TestWatchTask:
         assert task.reason == "Test reason"
         assert task.instruction == "Test instruction"
         assert task.watch_interval == 30.0
+        assert task.processing_mode == "vectors_only"
         assert task.is_active is False
         assert task.created_at == now
         assert task.last_execution_time == now
@@ -150,6 +135,7 @@ class TestWatchTask:
         assert data["to_uri"] == "viking://test"
         assert data["created_at"] == now.isoformat()
         assert data["is_active"] is True
+        assert data["processing_mode"] == "semantic_and_vectors"
         assert "auth_state" not in data
 
     def test_from_dict(self):
@@ -163,6 +149,7 @@ class TestWatchTask:
             "reason": "Test",
             "instruction": "Instruction",
             "watch_interval": 45.0,
+            "processing_mode": "vectors_only",
             "created_at": now.isoformat(),
             "last_execution_time": now.isoformat(),
             "next_execution_time": (now + timedelta(minutes=45)).isoformat(),
@@ -175,9 +162,16 @@ class TestWatchTask:
         assert task.path == "/test/path"
         assert task.to_uri == "viking://test"
         assert task.watch_interval == 45.0
+        assert task.processing_mode == "vectors_only"
         assert task.is_active is False
         assert task.created_at == now
         assert task.last_execution_time == now
+
+    def test_from_dict_defaults_legacy_processing_mode(self):
+        task = WatchTask.from_dict({"path": "/test/path"})
+
+        assert task.processing_mode == "semantic_and_vectors"
+        assert task.to_is_directory is None
 
     def test_calculate_next_execution_time(self):
         """Test calculating next execution time."""
@@ -251,7 +245,7 @@ class TestWatchManager:
         )
 
         deactivated = await watch_manager_no_fs.deactivate_tasks_under_uri_internal(
-            "viking://resources/codeask/wiki"
+            "viking://resources/codeask/wiki", TEST_ACCOUNT_ID
         )
 
         assert {task.task_id for task in deactivated} == {root.task_id, child.task_id}
@@ -260,124 +254,57 @@ class TestWatchManager:
         assert (await watch_manager_no_fs.get_task(sibling.task_id)).is_active is True
 
     @pytest.mark.asyncio
-    async def test_move_tasks_under_uri_internal_rewrites_subtree(
-        self, watch_manager_no_fs: WatchManager
-    ):
-        root = await watch_manager_no_fs.create_task(
-            path="/test/root",
-            to_uri="viking://resources/codeask/wiki",
-            parent_uri="viking://resources/codeask",
-            watch_interval=30.0,
-        )
-        child = await watch_manager_no_fs.create_task(
-            path="/test/child",
-            to_uri="viking://resources/codeask/wiki/page",
-            parent_uri="viking://resources/codeask/wiki",
-            watch_interval=30.0,
-        )
-
-        plan = await watch_manager_no_fs.plan_move_tasks_under_uri_internal(
-            "viking://resources/codeask/wiki",
-            "viking://resources/codeask/wiki-renamed",
-        )
-        updated = await watch_manager_no_fs.move_tasks_under_uri_internal(
-            "viking://resources/codeask/wiki",
-            "viking://resources/codeask/wiki-renamed",
-        )
-
-        assert plan == {
-            root.task_id: "viking://resources/codeask/wiki-renamed",
-            child.task_id: "viking://resources/codeask/wiki-renamed/page",
-        }
-        assert {task.task_id for task in updated} == {root.task_id, child.task_id}
-        moved_root = await watch_manager_no_fs.get_task_by_uri(
-            "viking://resources/codeask/wiki-renamed",
-            account_id=TEST_ACCOUNT_ID,
-            user_id=TEST_USER_ID,
-            role=TEST_ROLE,
-        )
-        moved_child = await watch_manager_no_fs.get_task_by_uri(
-            "viking://resources/codeask/wiki-renamed/page",
-            account_id=TEST_ACCOUNT_ID,
-            user_id=TEST_USER_ID,
-            role=TEST_ROLE,
-        )
-        assert moved_root is not None
-        assert moved_root.parent_uri == "viking://resources/codeask"
-        assert moved_child is not None
-        assert moved_child.parent_uri == "viking://resources/codeask/wiki-renamed"
-
-    @pytest.mark.asyncio
-    async def test_move_tasks_under_uri_internal_preserves_none_parent(
-        self, watch_manager_no_fs: WatchManager
-    ):
-        root = await watch_manager_no_fs.create_task(
+    async def test_target_prefix_rewrite_rolls_back_task_state_on_save_failure(self):
+        manager = WatchManager()
+        root = await manager.create_task(
             path="/test/root",
             to_uri="viking://resources/codeask/wiki",
             parent_uri=None,
             watch_interval=30.0,
         )
-
-        updated = await watch_manager_no_fs.move_tasks_under_uri_internal(
-            "viking://resources/codeask/wiki",
-            "viking://resources/codeask/wiki-renamed",
-        )
-
-        assert [task.task_id for task in updated] == [root.task_id]
-        moved_root = await watch_manager_no_fs.get_task(root.task_id)
-        assert moved_root is not None
-        assert moved_root.to_uri == "viking://resources/codeask/wiki-renamed"
-        assert moved_root.parent_uri is None
-
-    @pytest.mark.asyncio
-    async def test_plan_move_tasks_under_uri_internal_detects_conflict(
-        self, watch_manager_no_fs: WatchManager
-    ):
-        await watch_manager_no_fs.create_task(
-            path="/test/root",
-            to_uri="viking://resources/codeask/wiki",
-            watch_interval=30.0,
-        )
-        await watch_manager_no_fs.create_task(
-            path="/test/existing",
-            to_uri="viking://resources/codeask/wiki-renamed",
-            watch_interval=30.0,
-        )
-
-        with pytest.raises(ConflictError):
-            await watch_manager_no_fs.plan_move_tasks_under_uri_internal(
-                "viking://resources/codeask/wiki",
-                "viking://resources/codeask/wiki-renamed",
-            )
-
-    @pytest.mark.asyncio
-    async def test_sync_tasks_with_resource_move_internal_rolls_back_task_state_on_save_failure(
-        self, watch_manager_no_fs: WatchManager
-    ):
-        root = await watch_manager_no_fs.create_task(
-            path="/test/root",
-            to_uri="viking://resources/codeask/wiki",
-            parent_uri=None,
-            watch_interval=30.0,
-        )
-        watch_manager_no_fs._save_tasks = AsyncMock(side_effect=RuntimeError("save failed"))
-        move_resource = AsyncMock()
-        rollback_resource = AsyncMock()
+        manager._save_tasks = AsyncMock(side_effect=RuntimeError("save failed"))
 
         with pytest.raises(RuntimeError, match="save failed"):
-            await watch_manager_no_fs.sync_tasks_with_resource_move_internal(
+            await manager.rewrite_target_prefix_internal(
                 "viking://resources/codeask/wiki",
                 "viking://resources/codeask/wiki-renamed",
-                move_resource=move_resource,
-                rollback_resource=rollback_resource,
+                account_id=TEST_ACCOUNT_ID,
             )
 
-        move_resource.assert_awaited_once()
-        rollback_resource.assert_awaited_once()
-        restored = await watch_manager_no_fs.get_task(root.task_id)
+        restored = await manager.get_task(root.task_id)
         assert restored is not None
         assert restored.to_uri == "viking://resources/codeask/wiki"
         assert restored.parent_uri is None
+
+    @pytest.mark.asyncio
+    async def test_uri_index_move_and_deactivate_are_account_scoped(self):
+        manager = WatchManager()
+        uri = "viking://resources/shared"
+        task_a = await manager.create_task(path="/a", account_id="account-a", to_uri=uri)
+        task_b = await manager.create_task(path="/b", account_id="account-b", to_uri=uri)
+        with pytest.raises(ConflictError):
+            await manager.create_task(path="/duplicate", account_id="account-a", to_uri=uri)
+
+        await manager.validate_target_prefix_rewrite_internal(
+            uri,
+            f"{uri}-moved",
+            account_id="account-a",
+        )
+        await manager.rewrite_target_prefix_internal(
+            uri,
+            f"{uri}-moved",
+            account_id="account-a",
+        )
+        deactivated = await manager.deactivate_tasks_under_uri_internal(uri, "account-b")
+
+        assert task_a.to_uri == f"{uri}-moved"
+        assert task_a.is_active is True
+        assert task_b.to_uri == uri
+        assert task_b.is_active is False
+        assert deactivated == [task_b]
+        moved = await manager.get_task_by_uri(f"{uri}-moved", "account-a", "default", "root")
+        assert moved is task_a
+        assert await manager.get_task_by_uri(uri, "account-b", "default", "root") is task_b
 
     @pytest.mark.asyncio
     async def test_auth_state_persisted_and_hidden_from_public_dict(
@@ -641,23 +568,6 @@ class TestWatchManager:
 
         assert len(due_tasks) == 1
         assert due_tasks[0].task_id == task1.task_id
-
-    @pytest.mark.asyncio
-    async def test_clear_all_tasks(self, watch_manager: WatchManager):
-        """Test clearing all tasks."""
-        await watch_manager.create_task(path="/test/path1")
-        await watch_manager.create_task(path="/test/path2")
-
-        count = await watch_manager.clear_all_tasks()
-
-        assert count == 2
-
-        tasks = await watch_manager.get_all_tasks(
-            account_id=TEST_ACCOUNT_ID,
-            user_id=TEST_USER_ID,
-            role=TEST_ROLE,
-        )
-        assert len(tasks) == 0
 
     @pytest.mark.asyncio
     async def test_create_task_with_non_positive_interval_raises(self, watch_manager: WatchManager):

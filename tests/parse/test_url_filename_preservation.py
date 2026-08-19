@@ -10,6 +10,7 @@ Verifies fix for https://github.com/volcengine/OpenViking/issues/251:
 import pytest
 
 from openviking.parse.accessors.http_accessor import HTTPAccessor, URLType, URLTypeDetector
+from openviking.parse.accessors.mime_types import get_all_extensions, get_preferred_extension
 
 
 class TestExtractFilenameFromUrl:
@@ -71,6 +72,20 @@ class TestURLTypeDetectorCodeExtensions:
         assert url_type == URLType.DOWNLOAD_TXT
 
     @pytest.mark.asyncio
+    async def test_ts_extension_defaults_to_video_when_headers_unavailable(self, monkeypatch):
+        _patch_httpx_client(
+            monkeypatch,
+            headers={"content-type": "text/plain"},
+            content=b"export const value = 1;\n",
+        )
+
+        url_type, meta = await self.detector.detect("https://example.com/path/index.ts")
+
+        assert url_type == URLType.DOWNLOAD_VIDEO
+        assert meta["detected_by"] == "extension"
+        assert meta["extension"] == ".ts"
+
+    @pytest.mark.asyncio
     async def test_yaml_extension_detected(self):
         url = "https://example.com/config.yaml"
         url_type, meta = await self.detector.detect(url)
@@ -113,6 +128,22 @@ class TestURLTypeDetectorCodeExtensions:
         assert url_type == URLType.DOWNLOAD_PDF
 
     @pytest.mark.asyncio
+    async def test_ac3_extension_detected_without_head(self, monkeypatch):
+        _patch_httpx_client(
+            monkeypatch,
+            headers={"content-type": "application/octet-stream"},
+            content=b"\x0b\x77ac3-data",
+        )
+
+        url_type, meta = await self.detector.detect(
+            "https://filesamples.com/samples/audio/ac3/sample1.ac3"
+        )
+
+        assert url_type == URLType.DOWNLOAD_AUDIO
+        assert meta["detected_by"] == "extension"
+        assert meta["extension"] == ".ac3"
+
+    @pytest.mark.asyncio
     async def test_html_still_routes_to_download_html(self):
         """Ensure .html overrides CODE_EXTENSIONS mapping to DOWNLOAD_TXT."""
         url = "https://example.com/page.html"
@@ -152,6 +183,40 @@ class TestURLTypeDetectorCodeExtensions:
 
 class TestHTTPAccessorGetFallback:
     """Test GET header/content fallback for signed URLs that reject HEAD."""
+
+    def test_audio_ac3_mime_type_preserves_extension(self):
+        assert get_preferred_extension("audio/ac3") == ".ac3"
+
+    def test_content_type_alias_with_parameters_preserves_extension(self):
+        assert get_preferred_extension("image/jpg; profile=display-p3") == ".jpg"
+        assert get_all_extensions("image/jpg; profile=display-p3") == [".jpg", ".jpeg"]
+
+    def test_content_type_alias_with_parameters_routes_to_pdf(self):
+        detector = URLTypeDetector()
+        metadata = {}
+
+        url_type = detector._detect_from_media_type("application/x-pdf; charset=binary", metadata)
+
+        assert url_type == URLType.DOWNLOAD_PDF
+        assert metadata["media_type_alias"] == "application/x-pdf"
+
+    @pytest.mark.asyncio
+    async def test_ac3_url_with_generic_content_type_stays_audio(self, monkeypatch):
+        _patch_httpx_client(
+            monkeypatch,
+            headers={"content-type": "application/octet-stream"},
+            content=b"\x0b\x77ac3-data",
+        )
+
+        accessor = HTTPAccessor()
+        temp_path, url_type, meta = await accessor._download_url(
+            "https://filesamples.com/samples/audio/ac3/sample1.ac3"
+        )
+
+        assert url_type == URLType.DOWNLOAD_AUDIO
+        assert temp_path.endswith(".ac3")
+        assert meta["extension"] == ".ac3"
+        assert meta["original_filename"] == "sample1.ac3"
 
     @pytest.mark.asyncio
     async def test_get_content_disposition_refines_extensionless_docx_url(self, monkeypatch):
@@ -278,6 +343,7 @@ class TestHTTPAccessorGetFallback:
             (b"RIFF" + b"\x00" * 4 + b"WAVE" + b"data", URLType.DOWNLOAD_AUDIO, ".wav"),
             (b"RIFF" + b"\x00" * 4 + b"AVI " + b"data", URLType.DOWNLOAD_VIDEO, ".avi"),
             (b"ID3" + b"\x00" * 13, URLType.DOWNLOAD_AUDIO, ".mp3"),
+            (b"\x0b\x77" + b"\x00" * 14, URLType.DOWNLOAD_AUDIO, ".ac3"),
             (b"\x00\x00\x00\x18ftypisom" + b"\x00" * 4, URLType.DOWNLOAD_VIDEO, ".mp4"),
             (b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 4, URLType.DOWNLOAD_VIDEO, ".mov"),
             (b'<?xml version="1.0"?><svg></svg>', URLType.DOWNLOAD_IMAGE, ".svg"),

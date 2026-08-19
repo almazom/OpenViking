@@ -340,34 +340,6 @@ def is_valid_index_meta_data_for_update(meta_data: dict, field_meta_dict: dict) 
         return False
 
 
-def fix_collection_meta(meta_data: dict) -> dict:
-    fields = meta_data.get("Fields", [])
-    has_pk = False
-    for item in fields:
-        if item.get("IsPrimaryKey", False):
-            has_pk = True
-            break
-
-    if not has_pk:
-        fields.append(
-            {
-                "FieldName": "AUTO_ID",
-                "FieldType": "int64",
-                "IsPrimaryKey": True,
-            }
-        )
-
-    field_count = meta_data.get("_FieldsCount", 0)
-    for item in fields:
-        if "_FieldID" not in item:
-            item["_FieldID"] = field_count
-            field_count += 1
-
-    meta_data["_FieldsCount"] = field_count
-    meta_data["Fields"] = fields
-    return meta_data
-
-
 # Data validation logic
 REQUIRED_COLLECTION_FIELD_TYPE_CHECK = {
     "int64": ([int], None, 0),
@@ -436,9 +408,6 @@ def is_valid_fields_data(field_data_dict: dict, field_meta_dict: dict) -> bool:
 
 
 def fix_fields_data(field_data_dict: dict, field_meta_dict: dict) -> dict:
-    if len(field_data_dict) >= len(field_meta_dict):
-        return field_data_dict
-
     for field_name, field_meta in field_meta_dict.items():
         if field_name not in field_data_dict:
             # Handle both dict access and object access if field_meta is a Model (though here it's likely a dict)

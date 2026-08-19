@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import {
-  addAgentMessage,
+  addAgentMessages,
   buildAgentProfile,
   commitAgentSession,
   createAgentLogger,
@@ -84,7 +84,7 @@ async function main() {
       if (duplicateEvent) return null;
       const block = state.promptHash === promptHash && state.recallBlock
         ? state.recallBlock
-        : await recallForPrompt(fetchJSON, cfg, prompt, cwd, log).catch((error) => {
+        : await recallForPrompt(fetchJSON, cfg, prompt, cwd, log, { sessionId }).catch((error) => {
           logError("recall", error);
           return null;
         });
@@ -108,19 +108,18 @@ async function main() {
       state = await readHookState(requestedClient, nativeSessionId);
       const hashes = new Set(Array.isArray(state.capturedHashes) ? state.capturedHashes : []);
       const turnKey = state.pendingPrompt?.at || state.lastTurnKey || state.promptHash || "unknown-turn";
-      let captured = 0;
+      const toSend = [];
       for (const turn of buildTraeTurns(input, state)) {
         const hash = stableHash(turnKey, turn.role, turn.content);
         if (hashes.has(hash)) continue;
-        const result = await addAgentMessage(fetchJSON, sessionId, turn);
-        if (result.ok || [0, 408, 429].includes(result.status) || result.status >= 500) {
-          hashes.add(hash);
-          captured += 1;
-        }
+        toSend.push({ hash, turn });
       }
+      const result = await addAgentMessages(fetchJSON, sessionId, toSend.map((item) => item.turn));
+      const captured = result.sent + result.queued;
+      for (const item of toSend.slice(0, captured)) hashes.add(item.hash);
       let nextCount = Number(state.capturedSinceCommit || 0) + captured;
       if (captured > 0) {
-        const committed = await commitAgentSession(fetchJSON, sessionId);
+        const committed = await commitAgentSession(fetchJSON, sessionId, log);
         if (committed.ok) nextCount = 0;
       }
       await writeHookState(requestedClient, nativeSessionId, {

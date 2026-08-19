@@ -4,6 +4,7 @@
 Patch merge operation - SEARCH/REPLACE for strings, direct replace for others.
 """
 
+import asyncio
 from typing import Any, Type
 
 from openviking.session.memory.merge_op.base import (
@@ -34,7 +35,7 @@ class PatchOp(MergeOpBase):
             return f"PATCH operation for '{field_description}'. Follow the shared SEARCH/REPLACE rules above."
         return f"Replace value for '{field_description}'"
 
-    def apply(self, current_value: Any, patch_value: Any) -> Any:
+    async def apply(self, current_value: Any, patch_value: Any) -> Any:
         """
         Apply patch operation.
 
@@ -69,14 +70,18 @@ class PatchOp(MergeOpBase):
             # against non-empty content), so skip those blocks.
             valid_blocks = [b for b in patch_value.blocks if b.search]
             if valid_blocks:
-                return apply_str_patch(current_str, StrPatch(blocks=valid_blocks))
+                return await asyncio.to_thread(
+                    apply_str_patch,
+                    current_str,
+                    StrPatch(blocks=valid_blocks),
+                )
             # All blocks have empty search → no valid patches, keep original
             return current_value
 
         # Case 2: dict form of StrPatch (from JSON parsing)
         if isinstance(patch_value, dict):
-            try:
-                if "blocks" in patch_value:
+            if "blocks" in patch_value:
+                try:
                     blocks = []
                     for block_dict in patch_value["blocks"]:
                         if isinstance(block_dict, dict):
@@ -85,13 +90,19 @@ class PatchOp(MergeOpBase):
                             blocks.append(block_dict)
                     # Filter out empty-search blocks when there's existing content
                     valid_blocks = [b for b in blocks if b.search]
-                    if valid_blocks:
-                        return apply_str_patch(current_str, StrPatch(blocks=valid_blocks))
-                    # All blocks have empty search → keep original
-                    return current_value
-            except Exception:
-                # If conversion fails, treat as simple replacement
-                return str(patch_value) if patch_value is not None else ""
+                    converted_patch = StrPatch(blocks=valid_blocks) if valid_blocks else None
+                except Exception:
+                    # If conversion fails, treat as simple replacement
+                    return str(patch_value) if patch_value is not None else ""
+
+                if converted_patch is not None:
+                    return await asyncio.to_thread(
+                        apply_str_patch,
+                        current_str,
+                        converted_patch,
+                    )
+                # All blocks have empty search → keep original
+                return current_value
 
         # Case 3: Simple full replacement
         # 空字符串和 None 都保持原值

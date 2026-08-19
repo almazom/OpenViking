@@ -240,7 +240,6 @@ class VikingClient:
     def _matched_context_to_dict(self, matched_context: Any) -> Dict[str, Any]:
         """将 MatchedContext 对象或 dict 结果转换为字典。"""
         if isinstance(matched_context, dict):
-            relations = matched_context.get("relations", [])
             return {
                 "uri": str(matched_context.get("uri", "") or ""),
                 "context_type": str(
@@ -252,9 +251,6 @@ class VikingClient:
                 "category": str(matched_context.get("category", "") or ""),
                 "score": matched_context.get("score", 0.0),
                 "match_reason": str(matched_context.get("match_reason", "") or ""),
-                "relations": [self._relation_to_dict(r) for r in relations if r is not None]
-                if isinstance(relations, list)
-                else [],
             }
         return {
             "uri": getattr(matched_context, "uri", ""),
@@ -265,18 +261,6 @@ class VikingClient:
             "category": getattr(matched_context, "category", ""),
             "score": getattr(matched_context, "score", 0.0),
             "match_reason": getattr(matched_context, "match_reason", ""),
-            "relations": [
-                self._relation_to_dict(r) for r in getattr(matched_context, "relations", [])
-            ],
-        }
-
-    def _relation_to_dict(self, relation: Any) -> Dict[str, Any]:
-        """将 Relation 对象转换为字典"""
-        return {
-            "from_uri": getattr(relation, "from_uri", ""),
-            "to_uri": getattr(relation, "to_uri", ""),
-            "relation_type": getattr(relation, "relation_type", ""),
-            "reason": getattr(relation, "reason", ""),
         }
 
     def _matched_context_group_to_dicts(self, result: Any, group_name: str) -> List[Dict[str, Any]]:
@@ -581,19 +565,125 @@ class VikingClient:
             return await self.client.find(query, target_uri=target_uri, **kwargs)
         return await self.client.find(query, **kwargs)
 
-    async def add_resource(self, local_path: str, desc: str) -> Optional[Dict[str, Any]]:
+    async def add_resource(
+        self,
+        local_path: str,
+        desc: str,
+        to: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """添加资源到 Viking"""
-        result = await self.client.add_resource(path=local_path, reason=desc)
+        result = await self.client.add_resource(path=local_path, to=to, reason=desc)
         return result
 
     async def list_resources(
-        self, path: Optional[str] = None, recursive: bool = False
+        self,
+        path: Optional[str] = None,
+        recursive: bool = False,
+        node_limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         """列出资源"""
         if path is None or path == "":
             path = viking_resource_prefix
-        entries = await self.client.ls(path, recursive=recursive)
+        entries = await self.client.ls(path, recursive=recursive, node_limit=node_limit)
         return entries
+
+    async def stat(self, uri: str) -> Dict[str, Any]:
+        return await self.client.stat(uri)
+
+    async def attrs(self, uri: str) -> Dict[str, Any]:
+        return await self.client.attrs(uri)
+
+    async def mkdir(self, uri: str) -> None:
+        await self.client.mkdir(uri)
+
+    async def tree(self, uri: str, *, node_limit: int = 1000) -> List[Dict[str, Any]]:
+        return await self.client.tree(uri, node_limit=node_limit)
+
+    async def read_raw(self, uri: str, offset: int = 0, limit: int = -1) -> str:
+        return await self.client.read_raw(uri, offset=offset, limit=limit)
+
+    async def download_bytes(self, uri: str) -> bytes:
+        return await self.client.download_bytes(uri)
+
+    async def find_skills(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        score_threshold: float | None = None,
+        target_uri: str | None = None,
+    ) -> Dict[str, Any]:
+        return await self.client.find_skills(
+            query=query,
+            limit=limit,
+            score_threshold=score_threshold,
+            target_uri=target_uri,
+        )
+
+    async def get_skill(
+        self,
+        skill_name: str,
+        *,
+        target_uri: str,
+        include_content: bool = True,
+        include_files: bool = True,
+        include_integrity: bool = False,
+    ) -> Dict[str, Any]:
+        return await self.client.get_skill(
+            skill_name,
+            include_content=include_content,
+            include_files=include_files,
+            include_integrity=include_integrity,
+            include_source=False,
+            target_uri=target_uri,
+        )
+
+    async def add_skill(
+        self,
+        path: str,
+        *,
+        target_uri: str,
+        wait: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return await self.client.add_skill(
+            path,
+            target_uri=target_uri,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    async def update_skill(
+        self,
+        skill_name: str,
+        path: str,
+        *,
+        target_uri: str,
+        wait: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return await self.client.update_skill(
+            skill_name,
+            path,
+            target_uri=target_uri,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    async def batch_write(
+        self,
+        *,
+        root_uri: str,
+        operations: List[Dict[str, Any]],
+        wait: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return await self.client.batch_write(
+            root_uri=root_uri,
+            operations=operations,
+            wait=wait,
+            timeout=timeout,
+        )
 
     async def read_content(
         self,
@@ -886,6 +976,87 @@ class VikingClient:
         normalized: list[dict[str, Any]] = []
         assistant_peer_id = self._assistant_peer_id()
 
+        def build_payload(
+            payload_role: str,
+            parts: list[dict[str, Any]],
+            created_at: Any,
+            peer_id: Optional[str],
+        ) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "role": payload_role,
+                "parts": parts,
+                "created_at": created_at,
+            }
+            if peer_id:
+                payload["peer_id"] = peer_id
+            return payload
+
+        def build_tool_parts(tool_infos: Any) -> list[dict[str, Any]]:
+            parts: list[dict[str, Any]] = []
+            if not isinstance(tool_infos, list):
+                return parts
+
+            for tool_info in tool_infos:
+                if not isinstance(tool_info, dict):
+                    continue
+                tool_name = str(tool_info.get("tool_name") or tool_info.get("name") or "").strip()
+                if not tool_name:
+                    continue
+                if tool_info.get("auto") is True or tool_name == "auto_memory_search":
+                    continue
+
+                raw_args = tool_info.get("args", tool_info.get("arguments", {}))
+                if isinstance(raw_args, dict):
+                    tool_input = raw_args
+                else:
+                    try:
+                        tool_input = json.loads(raw_args) if raw_args else {}
+                    except Exception:
+                        tool_input = {"raw_args": str(raw_args)}
+
+                result_str = str(tool_info.get("result", tool_info.get("tool_output", "")))
+                skill_uri = str(tool_info.get("skill_uri") or "").strip()
+                if not skill_uri:
+                    explicit_skill_uris = tool_info.get("skill_uris") or []
+                    if isinstance(explicit_skill_uris, list) and explicit_skill_uris:
+                        skill_uri = str(explicit_skill_uris[0] or "").strip()
+                if not skill_uri and tool_name == "read_file" and result_str:
+                    match = re.search(
+                        r"^---\s*\nname:\s*(.+?)\s*\n",
+                        result_str,
+                        re.MULTILINE,
+                    )
+                    if match:
+                        skill_name = match.group(1).strip()
+                        skill_uri = self._skill_memory_uri(skill_name)
+
+                tool_id = str(
+                    tool_info.get("tool_call_id")
+                    or tool_info.get("tool_id")
+                    or tool_info.get("id")
+                    or f"{tool_name}_{uuid.uuid4().hex[:8]}"
+                )
+                explicit_status = str(tool_info.get("tool_status") or "").strip()
+                parts.append(
+                    {
+                        "type": "tool",
+                        "tool_id": tool_id,
+                        "tool_name": tool_name,
+                        "tool_uri": f"viking://session/{session_id}/tools/{tool_id}"
+                        if session_id
+                        else "",
+                        "tool_input": tool_input,
+                        "tool_output": result_str,
+                        "tool_status": explicit_status
+                        or ("completed" if tool_info.get("execute_success", True) else "error"),
+                        "skill_uri": skill_uri,
+                        "duration_ms": float(tool_info.get("duration", 0.0) or 0.0),
+                        "prompt_tokens": tool_info.get("input_token"),
+                        "completion_tokens": tool_info.get("output_token"),
+                    }
+                )
+            return parts
+
         for message in messages:
             role = str(message.get("role") or "").strip().lower()
             if role not in {"user", "assistant", "system", "tool"}:
@@ -893,72 +1064,13 @@ class VikingClient:
 
             content = self._session_message_content(message)
             tools_used = message.get("tools_used") or []
-            parts: list[dict[str, Any]] = []
+            tool_parts = build_tool_parts(tools_used)
+            agent_turns = message.get("agent_turns")
 
-            if content:
-                parts.append({"type": "text", "text": content})
-
-            if isinstance(tools_used, list):
-                for tool_info in tools_used:
-                    if not isinstance(tool_info, dict):
-                        continue
-                    tool_name = str(tool_info.get("tool_name") or "").strip()
-                    if not tool_name:
-                        continue
-
-                    raw_args = tool_info.get("args", {})
-                    if isinstance(raw_args, dict):
-                        tool_input = raw_args
-                    else:
-                        try:
-                            tool_input = json.loads(raw_args) if raw_args else {}
-                        except Exception:
-                            tool_input = {"raw_args": str(raw_args)}
-
-                    result_str = str(tool_info.get("result", ""))
-                    skill_uri = ""
-                    if tool_name == "read_file" and result_str:
-                        match = re.search(
-                            r"^---\s*\nname:\s*(.+?)\s*\n",
-                            result_str,
-                            re.MULTILINE,
-                        )
-                        if match:
-                            skill_name = match.group(1).strip()
-                            skill_uri = self._skill_memory_uri(skill_name)
-
-                    tool_id = f"{tool_name}_{uuid.uuid4().hex[:8]}"
-                    parts.append(
-                        {
-                            "type": "tool",
-                            "tool_id": tool_id,
-                            "tool_name": tool_name,
-                            "tool_uri": f"viking://session/{session_id}/tools/{tool_id}"
-                            if session_id
-                            else "",
-                            "tool_input": tool_input,
-                            "tool_output": result_str[:2000],
-                            "tool_status": "completed"
-                            if tool_info.get("execute_success", True)
-                            else "error",
-                            "skill_uri": skill_uri,
-                            "duration_ms": float(tool_info.get("duration", 0.0) or 0.0),
-                            "prompt_tokens": tool_info.get("input_token"),
-                            "completion_tokens": tool_info.get("output_token"),
-                        }
-                    )
-
-            if not parts:
+            if not content and not tool_parts and not agent_turns:
                 continue
 
             ov_role = "user" if role == "user" else "assistant"
-            payload = {
-                "role": ov_role,
-                "content": content,
-                "parts": parts,
-                "created_at": message.get("created_at") or message.get("timestamp"),
-            }
-
             peer_id = message.get("peer_id")
             if not peer_id and ov_role == "user":
                 peer_id = message.get("sender_id") or default_user_peer_id
@@ -966,10 +1078,58 @@ class VikingClient:
                 peer_id = assistant_peer_id
 
             safe_message_peer_id = self._peer_id(peer_id)
-            if safe_message_peer_id:
-                payload["peer_id"] = safe_message_peer_id
+            created_at = message.get("created_at") or message.get("timestamp")
 
-            normalized.append(payload)
+            turn_payloads: list[dict[str, Any]] = []
+            if ov_role == "assistant" and isinstance(agent_turns, list):
+                for turn in agent_turns:
+                    if not isinstance(turn, dict):
+                        continue
+                    turn_parts: list[dict[str, Any]] = []
+                    turn_content = self._session_message_content(turn)
+                    if turn_content:
+                        turn_parts.append({"type": "text", "text": turn_content})
+                    turn_parts.extend(build_tool_parts(turn.get("tool_calls") or turn.get("tools")))
+                    if not turn_parts:
+                        continue
+                    turn_payloads.append(
+                        build_payload(
+                            "assistant",
+                            turn_parts,
+                            turn.get("created_at") or turn.get("timestamp") or created_at,
+                            safe_message_peer_id,
+                        )
+                    )
+
+            if ov_role == "user" and content:
+                normalized.append(
+                    build_payload(
+                        "user",
+                        [{"type": "text", "text": content}],
+                        created_at,
+                        safe_message_peer_id,
+                    )
+                )
+            if turn_payloads:
+                normalized.extend(turn_payloads)
+            elif tool_parts:
+                normalized.append(
+                    build_payload(
+                        "assistant",
+                        tool_parts,
+                        created_at,
+                        safe_message_peer_id if ov_role == "assistant" else None,
+                    )
+                )
+            if ov_role == "assistant" and content:
+                normalized.append(
+                    build_payload(
+                        "assistant",
+                        [{"type": "text", "text": content}],
+                        created_at,
+                        safe_message_peer_id,
+                    )
+                )
 
         return normalized
 
@@ -1054,6 +1214,10 @@ class VikingClient:
         keep_recent_count: int = 0,
         user_id: Optional[str] = None,
         memory_policy: Optional[Dict[str, Any]] = None,
+        retention_mode: Optional[str] = None,
+        keep_recent_turn_count: Optional[int] = None,
+        retained_message_token_budget: Optional[int] = None,
+        min_raw_tail_steps: Optional[int] = None,
     ) -> Dict[str, Any]:
         await self.ensure_session(
             session_id,
@@ -1063,9 +1227,20 @@ class VikingClient:
             else self.default_memory_policy(),
         )
         client = await self._session_client_for_user(user_id)
+        retention_kwargs = {
+            key: value
+            for key, value in {
+                "retention_mode": retention_mode,
+                "keep_recent_turn_count": keep_recent_turn_count,
+                "retained_message_token_budget": retained_message_token_budget,
+                "min_raw_tail_steps": min_raw_tail_steps,
+            }.items()
+            if value is not None
+        }
         return await client.commit_session(
             session_id,
             keep_recent_count=keep_recent_count,
+            **retention_kwargs,
         )
 
     async def commit(
@@ -1076,6 +1251,10 @@ class VikingClient:
         keep_recent_count: int = 0,
         peer_id: Optional[str] = None,
         memory_policy: Optional[Dict[str, Any]] = None,
+        retention_mode: Optional[str] = None,
+        keep_recent_turn_count: Optional[int] = None,
+        retained_message_token_budget: Optional[int] = None,
+        min_raw_tail_steps: Optional[int] = None,
     ):
         """Append messages to a stable session and commit it."""
         session_user_id = self._effective_session_user_id(user_id)
@@ -1093,11 +1272,22 @@ class VikingClient:
             default_user_peer_id=self._peer_id(peer_id),
             session_user_id=session_user_id,
         )
+        retention_kwargs = {
+            key: value
+            for key, value in {
+                "retention_mode": retention_mode,
+                "keep_recent_turn_count": keep_recent_turn_count,
+                "retained_message_token_budget": retained_message_token_budget,
+                "min_raw_tail_steps": min_raw_tail_steps,
+            }.items()
+            if value is not None
+        }
         commit_result = await self.commit_session(
             session_id,
             keep_recent_count=keep_recent_count,
             user_id=session_user_id,
             memory_policy=session_memory_policy,
+            **retention_kwargs,
         )
         logger.debug(
             f"Committed OpenViking session {session_id}, "

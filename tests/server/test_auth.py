@@ -3,6 +3,7 @@
 
 """Tests for multi-tenant authentication (openviking/server/auth.py)."""
 
+import asyncio
 import uuid
 
 import httpx
@@ -25,7 +26,6 @@ from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import (
     TaskTracker,
     get_task_tracker,
-    reset_task_tracker,
     set_task_tracker,
 )
 from openviking_cli.exceptions import InvalidArgumentError, OpenVikingError, PermissionDeniedError
@@ -90,6 +90,7 @@ def _make_request(
 ) -> Request:
     """Create a minimal Starlette request for auth dependency tests."""
     # Ensure built-in plugins are registered
+    import openviking.server.auth.plugins  # noqa: F401
 
     raw_headers = []
     for key, value in (headers or {}).items():
@@ -128,6 +129,7 @@ def _build_auth_http_test_app(
     the test focused on request auth behavior and the structured HTTP error body.
     """
     # Ensure built-in plugins are registered
+    import openviking.server.auth.plugins  # noqa: F401
 
     app = FastAPI()
     # When auth is disabled and mode is the default api_key, fall back to dev mode
@@ -409,19 +411,19 @@ async def test_admin_sync_route_rejects_user_key(auth_client: httpx.AsyncClient,
 
 async def test_task_endpoints_require_auth():
     """Task endpoints must reject unauthenticated callers before lookup/filtering."""
-    reset_task_tracker()
+    set_task_tracker(None)
     app = _build_task_http_test_app(identity=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         for url in ("/api/v1/tasks", "/api/v1/tasks/nonexistent-id"):
             resp = await client.get(url)
             assert resp.status_code == 401
-    reset_task_tracker()
+    set_task_tracker(None)
 
 
 async def test_task_endpoints_are_user_scoped():
     """Authenticated callers must not see another user's background tasks."""
-    reset_task_tracker()
+    set_task_tracker(None)
     _set_fake_task_tracker()
     account_id = _uid()
     tracker = get_task_tracker()
@@ -468,7 +470,7 @@ async def test_task_endpoints_are_user_scoped():
         assert bob_list.status_code == 200
         assert {task["task_id"] for task in bob_list.json()["result"]} == {bob_task.task_id}
 
-    reset_task_tracker()
+    set_task_tracker(None)
 
 
 # ---- Role-based access tests ----
@@ -761,7 +763,6 @@ async def test_actor_peer_header_sets_request_context_scope():
     ctx = await get_request_context(request, identity, "web-visitor-alice")
 
     assert ctx.actor_peer_id == "web-visitor-alice"
-    assert ctx.legacy_agent_id is None
 
 
 async def test_empty_actor_peer_header_is_unset():
@@ -1097,6 +1098,84 @@ async def test_trusted_mode_with_root_api_key_accepts_matching_api_key():
     assert identity.user_id == "alice"
 
 
+async def test_trusted_mode_root_key_allows_admin_role_header(auth_app):
+    """Trusted upstreams with the root key may assert ADMIN role for tenant routes."""
+    manager = auth_app.state.api_key_manager
+    account_id = _uid()
+    await manager.create_account(account_id, "owner")
+    await manager.register_user(account_id, "alice", "user")
+
+    request = _make_request(
+        "/api/v1/resources",
+        headers={
+            "X-API-Key": ROOT_KEY,
+            "X-OpenViking-Account": account_id,
+            "X-OpenViking-User": "alice",
+            "X-OpenViking-Role": " ADMIN ",
+        },
+        auth_enabled=True,
+        auth_mode="trusted",
+        root_api_key=ROOT_KEY,
+        api_key_manager=manager,
+    )
+
+    identity = await resolve_identity(
+        request,
+        x_api_key=ROOT_KEY,
+        x_openviking_account=account_id,
+        x_openviking_user="alice",
+    )
+
+    assert identity.role == Role.ADMIN
+    assert identity.account_id == account_id
+    assert identity.user_id == "alice"
+
+
+async def test_trusted_mode_rejects_root_role_header():
+    """Trusted role header should not allow asserting ROOT."""
+    request = _make_request(
+        "/api/v1/resources",
+        headers={
+            "X-API-Key": ROOT_KEY,
+            "X-OpenViking-Account": "acme",
+            "X-OpenViking-User": "alice",
+            "X-OpenViking-Role": "root",
+        },
+        auth_enabled=False,
+        auth_mode="trusted",
+        root_api_key=ROOT_KEY,
+    )
+
+    with pytest.raises(InvalidArgumentError, match="X-OpenViking-Role"):
+        await resolve_identity(
+            request,
+            x_api_key=ROOT_KEY,
+            x_openviking_account="acme",
+            x_openviking_user="alice",
+        )
+
+
+async def test_trusted_mode_rejects_role_header_without_root_key():
+    """Role assertions require a configured root key so localhost trusted mode cannot self-elevate."""
+    request = _make_request(
+        "/api/v1/resources",
+        headers={
+            "X-OpenViking-Account": "acme",
+            "X-OpenViking-User": "alice",
+            "X-OpenViking-Role": "admin",
+        },
+        auth_enabled=False,
+        auth_mode="trusted",
+    )
+
+    with pytest.raises(InvalidArgumentError, match="X-OpenViking-Role"):
+        await resolve_identity(
+            request,
+            x_openviking_account="acme",
+            x_openviking_user="alice",
+        )
+
+
 async def test_trusted_mode_tenant_http_routes_require_explicit_identity_headers():
     """Trusted mode should reject tenant-scoped routes without account/user headers."""
     app = _build_auth_http_test_app(
@@ -1306,6 +1385,23 @@ async def test_trusted_mode_admin_api_with_partial_identity_still_requires_full_
         )
 
 
+async def test_trusted_mode_root_key_can_target_account_without_caller_identity():
+    """A verified Root key should not treat a target account as partial caller identity."""
+    request = _make_request(
+        "/api/v1/admin/accounts/acme/users",
+        headers={"X-API-Key": ROOT_KEY},
+        auth_mode="trusted",
+        root_api_key=ROOT_KEY,
+    )
+    request.scope["path_params"] = {"account_id": "acme"}
+
+    identity = await resolve_identity(request, x_api_key=ROOT_KEY)
+
+    assert identity.role == Role.ROOT
+    assert identity.account_id == "acme"
+    assert identity.user_id == "trusted"
+
+
 async def test_trusted_mode_get_request_context_exempts_admin_paths():
     """get_request_context should exempt admin paths from identity checks in trusted mode."""
     # Admin path with ROOT identity from default
@@ -1372,3 +1468,95 @@ async def test_trusted_mode_admin_api_http_route_without_identity():
     assert response.json()["result"]["role"] == "root"
     assert response.json()["result"]["account_id"] == "trusted"
     assert response.json()["result"]["user_id"] == "trusted"
+
+
+# ---- API key store watcher (read-replica refresh) tests ----
+#
+# When server.api_key_watch_enabled is set, the api_key plugin starts a
+# background task that polls the shared key store and reloads the in-memory
+# index on change, so read replicas converge on writer-side user changes.
+
+
+class _FakeManager:
+    """Minimal APIKeyManager stand-in that records watcher interactions."""
+
+    def __init__(self, signatures):
+        # signatures: list of signatures returned on successive calls; the last
+        # value is repeated once exhausted.
+        self._signatures = list(signatures)
+        self.reload_calls = 0
+        self.signature_calls = 0
+
+    async def compute_store_signature(self):
+        self.signature_calls += 1
+        idx = min(self.signature_calls - 1, len(self._signatures) - 1)
+        return self._signatures[idx]
+
+    async def reload(self):
+        self.reload_calls += 1
+
+
+async def test_watcher_disabled_by_default(auth_service):
+    """No watch task should start when api_key_watch_enabled is unset."""
+    from openviking.server.auth.plugins import ApiKeyAuthPlugin
+
+    app = create_app(config=ServerConfig(root_api_key=ROOT_KEY), service=auth_service)
+    plugin = ApiKeyAuthPlugin()
+    config = ServerConfig(root_api_key=ROOT_KEY)
+    await plugin.initialize(app, auth_service, config)
+    try:
+        assert plugin._watch_task is None
+    finally:
+        await plugin.shutdown()
+
+
+async def test_watcher_reloads_on_signature_change(auth_service):
+    """The watcher reloads only when the store signature changes."""
+    from openviking.server.auth.plugins import ApiKeyAuthPlugin
+
+    manager = _FakeManager(signatures=[("sig-a",), ("sig-b",)])
+    task = asyncio.create_task(
+        ApiKeyAuthPlugin._watch_key_store(manager, interval=0.01)
+    )
+    try:
+        await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # First signature is the baseline; the change to sig-b triggers a reload.
+    assert manager.reload_calls >= 1
+
+
+async def test_watcher_skips_reload_when_unchanged(auth_service):
+    """A stable signature must not trigger any reload."""
+    from openviking.server.auth.plugins import ApiKeyAuthPlugin
+
+    manager = _FakeManager(signatures=[("sig-stable",)])
+    task = asyncio.create_task(
+        ApiKeyAuthPlugin._watch_key_store(manager, interval=0.01)
+    )
+    try:
+        await asyncio.sleep(0.08)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert manager.reload_calls == 0
+
+
+async def test_shutdown_cancels_watch_task(auth_service):
+    """shutdown() must cancel a running watch task and clear the handle."""
+    from openviking.server.auth.plugins import ApiKeyAuthPlugin
+
+    app = create_app(config=ServerConfig(root_api_key=ROOT_KEY), service=auth_service)
+    plugin = ApiKeyAuthPlugin()
+    config = ServerConfig(
+        root_api_key=ROOT_KEY,
+        api_key_watch_enabled=True,
+        api_key_watch_interval_seconds=0.01,
+    )
+    await plugin.initialize(app, auth_service, config)
+    assert plugin._watch_task is not None
+    await plugin.shutdown()
+    assert plugin._watch_task is None

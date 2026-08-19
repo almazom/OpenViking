@@ -10,8 +10,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.core.context import ContextLevel
 from openviking.retrieve.hierarchical_retriever import HierarchicalRetriever, RetrieverMode
 from openviking.server.identity import RequestContext, Role
+from openviking.storage.semantic_sidecar import render_semantic_sidecar
+from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.retrieve.types import ContextType, TypedQuery
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import RerankConfig, RetrievalConfig
@@ -239,6 +242,12 @@ def test_retriever_initializes_rerank_client(monkeypatch):
     assert retriever._rerank_client is fake_client
 
 
+def test_rerank_max_input_tokens_accepts_zero_or_at_least_128():
+    assert RerankConfig(max_input_tokens=0).max_input_tokens == 0
+    with pytest.raises(ValueError, match="max_input_tokens"):
+        RerankConfig(max_input_tokens=127)
+
+
 @pytest.mark.asyncio
 async def test_retrieve_uses_rerank_scores_in_thinking_mode(monkeypatch):
     fake_client = FakeRerankClient([0.95, 0.05, 0.11, 0.95])
@@ -263,6 +272,85 @@ async def test_retrieve_uses_rerank_scores_in_thinking_mode(monkeypatch):
     assert fake_client.calls[0] == ("hello", ["root A", "root B"])
     assert fake_client.calls[1] == ("hello", ["child A", "child B"])
     assert storage.search_calls[0]["level"] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_rerank_scores_preserves_fallbacks_for_empty_documents(monkeypatch):
+    fake_client = FakeRerankClient([0.95, 0.05])
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.RerankClient.from_config",
+        lambda config: fake_client,
+    )
+
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=DummyEmbedder(),
+        rerank_config=_config(),
+    )
+
+    scores = await retriever._rerank_scores(
+        "hello",
+        ["root A", "", "   ", "root D"],
+        [0.2, 0.8, 0.7, 0.4],
+    )
+
+    assert scores == [0.95, 0.8, 0.7, 0.05]
+    assert fake_client.calls == [("hello", ["root A", "root D"])]
+
+
+@pytest.mark.asyncio
+async def test_rerank_scores_does_not_truncate_by_default(monkeypatch):
+    oversized_document = "summary-start " + ("填充内容" * 600) + " relevant-tail"
+    fake_client = FakeRerankClient([0.95])
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.RerankClient.from_config",
+        lambda config: fake_client,
+    )
+
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=DummyEmbedder(),
+        rerank_config=RerankConfig(ak="ak", sk="sk"),
+    )
+
+    await retriever._rerank_scores("query", [oversized_document], [0.2])
+
+    assert retriever.rerank_max_input_tokens == 0
+    assert fake_client.calls == [("query", [oversized_document])]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "oversized_document",
+    [
+        "summary-start " + ("filler " * 600) + " relevant-tail",
+        "摘要开头" + ("填充内容" * 600) + "相关结论",
+    ],
+)
+async def test_rerank_scores_bounds_oversized_documents_and_preserves_tail(
+    monkeypatch, oversized_document
+):
+    fake_client = FakeRerankClient([0.95])
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.RerankClient.from_config",
+        lambda config: fake_client,
+    )
+
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=DummyEmbedder(),
+        rerank_config=RerankConfig(ak="ak", sk="sk", max_input_tokens=128),
+    )
+
+    scores = await retriever._rerank_scores("query", [oversized_document], [0.2])
+
+    assert scores == [0.95]
+    rerank_query, rerank_documents = fake_client.calls[0]
+    bounded_document = rerank_documents[0]
+    assert estimate_text_tokens(rerank_query) + estimate_text_tokens(bounded_document) <= 128
+    assert "summary-start" in bounded_document or "摘要开头" in bounded_document
+    assert "relevant-tail" in bounded_document or "相关结论" in bounded_document
+    assert bounded_document != oversized_document
 
 
 @pytest.mark.asyncio
@@ -558,7 +646,7 @@ async def test_retrieval_hotness_alpha_blends_when_configured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_convert_to_matched_contexts_returns_empty_relations():
+async def test_convert_to_matched_contexts_propagates_search_tags():
     retriever = HierarchicalRetriever(
         storage=DummyStorage(),
         embedder=None,
@@ -566,8 +654,60 @@ async def test_convert_to_matched_contexts_returns_empty_relations():
     )
 
     result = await retriever._convert_to_matched_contexts(
-        [_result("viking://resources/file-a", 1.0, abstract="child A")],
+        [
+            _result(
+                "viking://resources/file-a",
+                1.0,
+                abstract="child A",
+                search_tags=["team=infra", "project=viking"],
+            )
+        ],
         ctx=_ctx(),
     )
 
-    assert result[0].relations == []
+    assert result[0].search_tags == ["team=infra", "project=viking"]
+
+
+@pytest.mark.asyncio
+async def test_convert_to_matched_contexts_defaults_tags_and_body_previews():
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=None,
+        rerank_config=None,
+    )
+    uri = "viking://resources/demo"
+    metadata = {
+        "source": {"kind": "http", "uri": "https://example.com/private.pdf"},
+        "generated_by": {"component": "SemanticProcessor", "trigger": "ingest"},
+    }
+    markdown = "---\ntitle: User document\n---\n\nVisible body."
+
+    result = await retriever._convert_to_matched_contexts(
+        [
+            _result(
+                uri,
+                1.0,
+                level=int(ContextLevel.ABSTRACT),
+                abstract=render_semantic_sidecar(
+                    ContextLevel.ABSTRACT, uri, "Visible abstract.", metadata
+                ),
+            ),
+            _result(
+                uri,
+                0.9,
+                level=int(ContextLevel.OVERVIEW),
+                abstract=render_semantic_sidecar(
+                    ContextLevel.OVERVIEW, uri, "# Visible overview", metadata
+                ),
+            ),
+            _result("viking://resources/demo.md", 0.8, level=2, abstract=markdown),
+        ],
+        ctx=_ctx(),
+    )
+
+    assert [item.search_tags for item in result] == [[], [], []]
+    assert [item.abstract for item in result] == [
+        "Visible abstract.",
+        "# Visible overview",
+        markdown,
+    ]

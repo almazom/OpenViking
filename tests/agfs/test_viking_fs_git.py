@@ -80,21 +80,16 @@ def workspace():
 
 @pytest.fixture
 def vfs(workspace):
-    from openviking.storage.transaction import init_lock_manager, reset_lock_manager
-
     cfg, fs_root = _write_workspace(workspace)
     client = _build_client(cfg, fs_root)
-    init_lock_manager(client)
     try:
         yield VikingFS(agfs=client)
     finally:
-        reset_lock_manager()
+        pass
 
 
 @pytest.fixture
 def vfs_disabled(workspace):
-    from openviking.storage.transaction import init_lock_manager, reset_lock_manager
-
     cfg = workspace / "ragfs.toml"
     cfg.write_text(
         """
@@ -106,11 +101,10 @@ enabled = false
     fs_root.mkdir()
     client = ragfs_python.RAGFSBindingClient(git_config_path=str(cfg))
     client.mount("localfs", "/local", {"local_dir": str(fs_root)})
-    init_lock_manager(client)
     try:
         yield VikingFS(agfs=client)
     finally:
-        reset_lock_manager()
+        pass
 
 
 # =========================================================================
@@ -128,11 +122,11 @@ class TestUriToTreePath:
         )
 
     def test_session_uri(self, vfs):
-        # ``session`` is a virtual scope: it canonicalizes into the owning
-        # user's sessions subtree, and the git tree path mirrors that real
-        # storage layout (so commit/restore target the actual stored bytes).
         ctx = _make_ctx()
-        assert vfs._uri_to_tree_path("viking://session", ctx=ctx) == "user/user1/sessions"
+        assert (
+            vfs._uri_to_tree_path("viking://user/user1/sessions", ctx=ctx)
+            == "user/user1/sessions"
+        )
 
     def test_trailing_slash_kept_as_directory(self, vfs):
         # Normalization may strip trailing slash; this is acceptable
@@ -217,6 +211,60 @@ class TestCommitShowLog:
 
         limited = await vfs.log(limit=2, ctx=ctx)
         assert [h["oid"] for h in limited] == [c3["commit_oid"], c2["commit_oid"]]
+
+    async def test_log_filters_files_directories_and_deletions(self, vfs):
+        ctx = _make_ctx(account="acct_log_paths")
+        target = "viking://resources/proj/a.md"
+        project = "viking://resources/proj"
+
+        await vfs.write_file(target, b"v1", ctx=ctx)
+        added = await vfs.commit(message="add target", paths=[target], ctx=ctx)
+
+        unrelated_path = "viking://resources/other.md"
+        await vfs.write_file(unrelated_path, b"other", ctx=ctx)
+        await vfs.commit(
+            message="unrelated",
+            paths=[unrelated_path],
+            ctx=ctx,
+        )
+
+        sibling = "viking://resources/proj/nested/b.md"
+        await vfs.write_file(sibling, b"sibling", ctx=ctx)
+        directory_changed = await vfs.commit(
+            message="change project directory",
+            paths=[sibling],
+            ctx=ctx,
+        )
+
+        await vfs.rm(target, ctx=ctx)
+        deleted = await vfs.commit(message="delete target", paths=[target], ctx=ctx)
+
+        file_history = await vfs.log(paths=[target], limit=2, ctx=ctx)
+        assert [entry["oid"] for entry in file_history] == [
+            deleted["commit_oid"],
+            added["commit_oid"],
+        ]
+
+        directory_history = await vfs.log(paths=[project], limit=10, ctx=ctx)
+        assert [entry["oid"] for entry in directory_history] == [
+            deleted["commit_oid"],
+            directory_changed["commit_oid"],
+            added["commit_oid"],
+        ]
+
+    async def test_log_rejects_too_many_unique_paths(self, vfs):
+        ctx = _make_ctx(account="acct_log_path_budget")
+        paths = [f"viking://resources/path-{index}.md" for index in range(33)]
+
+        with pytest.raises(AGFSInvalidOperationError, match="too many log filter paths"):
+            await vfs.log(paths=paths, limit=1, ctx=ctx)
+
+    async def test_log_rejects_path_deeper_than_64_components(self, vfs):
+        ctx = _make_ctx(account="acct_log_depth_budget")
+        path = "viking://" + "/".join(["resources", *(["nested"] * 64)])
+
+        with pytest.raises(AGFSInvalidOperationError, match="has depth 65"):
+            await vfs.log(paths=[path], limit=1, ctx=ctx)
 
     async def test_show_missing_branch_raises(self, vfs):
         ctx = _make_ctx(account="acct_missing")
@@ -405,15 +453,12 @@ def encryptor(workspace):
 
 @pytest.fixture
 def vfs_encrypted(workspace, encryptor):
-    from openviking.storage.transaction import init_lock_manager, reset_lock_manager
-
     cfg, fs_root = _write_workspace(workspace)
     client = _build_client(cfg, fs_root)
-    init_lock_manager(client)
     try:
         yield VikingFS(agfs=client, encryptor=encryptor)
     finally:
-        reset_lock_manager()
+        pass
 
 
 @pytest.mark.asyncio
@@ -528,7 +573,7 @@ def test_classify_restore_path(vfs):
         ContextLevel.OVERVIEW,
     )
 
-    # .relations.json has no vector side-effect
+    # .relations.json is an obsolete sidecar with no vector side-effect.
     assert vfs._classify_restore_path("resources/proj/.relations.json", deleted=False) is None
     assert vfs._classify_restore_path("resources/proj/.relations.json", deleted=True) is None
 
@@ -797,7 +842,6 @@ async def test_restore_returns_pollable_task_id(vfs, monkeypatch):
 
     from openviking.service.task_tracker import (
         TaskTracker,
-        reset_task_tracker,
         set_task_tracker,
     )
 
@@ -834,20 +878,20 @@ async def test_restore_returns_pollable_task_id(vfs, monkeypatch):
         task_id = result.get("task_id")
         assert task_id
 
-        # Let the tracked background worker run to completion.
-        for _ in range(5):
-            await asyncio.sleep(0)
-
         from openviking.service.task_tracker import get_task_tracker
 
         tracker = get_task_tracker()
-        task = await tracker.get(task_id, account_id=ctx.account_id, user_id=ctx.user.user_id)
-        assert task is not None
+        task = await tracker.wait(
+            task_id,
+            account_id=ctx.account_id,
+            user_id=ctx.user.user_id,
+            timeout=1,
+        )
         assert task.task_type == "snapshot_restore_reindex"
         assert task.status.value == "completed"
         assert ("reindex_file", "viking://resources/proj/x.md") in spy.calls
     finally:
-        reset_task_tracker()
+        set_task_tracker(None)
 
 
 # =========================================================================

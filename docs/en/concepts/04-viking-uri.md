@@ -96,8 +96,9 @@ viking://user/resources/docs/                 # Current user's resource director
 viking://user/skills/                         # Current user's skills
 viking://user/skills/search-web               # Specific skill
 viking://user/memories/                       # Current user's memories
-viking://user/memories/cases/                 # Learned cases
-viking://user/memories/patterns/              # Learned patterns
+viking://user/memories/cases/                 # Task cases used for training and evaluation
+viking://user/memories/trajectories/          # Reusable task-execution trajectories
+viking://user/memories/experiences/           # Experience distilled from execution outcomes
 viking://user/{user_id}/peers/{peer_id}/memories/
 viking://user/{user_id}/peers/{peer_id}/resources/
 ```
@@ -205,7 +206,7 @@ ov add-resource --parent-auto-create "viking://resources/emails/{calendar:today}
 ov read "viking://resources/logs/{calendar:yesterday}/app.log"
 
 # Prep tomorrow's tasks
-ov write --uri "viking://resources/tasks/{calendar:tomorrow}/todo.md" --content "Plan the day"
+ov write "viking://resources/tasks/{calendar:tomorrow}/todo.md" --content "Plan the day"
 
 # Upload monthly report, --parent-auto-create can be shortened to -p
 ov add-resource --parent-auto-create "viking://resources/reports/{calendar:ym}" ./report.pdf
@@ -334,7 +335,7 @@ Each directory may contain special files:
 |------|---------|
 | `.abstract.md` | L0 abstract (~100 tokens) |
 | `.overview.md` | L1 overview (~2k tokens) |
-| `.relations.json` | Related resources |
+| `` | Related resources |
 | `.meta.json` | Metadata |
 
 ## Best Practices

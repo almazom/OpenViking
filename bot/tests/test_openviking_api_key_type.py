@@ -864,6 +864,13 @@ def test_validate_openviking_auth_allows_trusted_root(monkeypatch, capsys):
     )
 
     def _fake_probe(_server_url, path, *, headers=None):
+        if path == "/health":
+            assert headers == {
+                "X-OpenViking-Account": "acct",
+                "X-OpenViking-User": "admin",
+                "X-API-Key": "root-key",
+            }
+            return _auth_probe(data={"auth_mode": "trusted"})
         if path == "/api/v1/system/status":
             assert headers == {
                 "X-OpenViking-Account": "acct",
@@ -871,7 +878,7 @@ def test_validate_openviking_auth_allows_trusted_root(monkeypatch, capsys):
                 "X-API-Key": "root-key",
             }
             return _auth_probe(data={"status": "ok", "result": {"user": "admin"}})
-        return _auth_probe(data={"auth_mode": "trusted"})
+        raise AssertionError(f"unexpected auth probe path: {path}")
 
     monkeypatch.setattr(config_loader_module, "_request_openviking_json", _fake_probe)
 
@@ -879,20 +886,6 @@ def test_validate_openviking_auth_allows_trusted_root(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert captured.err == ""
-
-
-def test_warn_openviking_auth_config_uses_complete_validation(monkeypatch):
-    config = SimpleNamespace(ov_server=SimpleNamespace(server_url="http://ov.local"))
-    called = []
-    monkeypatch.setattr(
-        config_loader_module,
-        "validate_openviking_auth",
-        lambda value: called.append(value),
-    )
-
-    config_loader_module.warn_openviking_auth_config(config)
-
-    assert called == [config]
 
 
 def test_memory_user_cli_option_warns_at_runtime(capsys):
@@ -1824,13 +1817,16 @@ async def test_viking_client_normalizes_system_tool_and_tool_result_messages(mon
         "assistant",
         "assistant",
         "assistant",
+        "assistant",
     ]
     assert all("peer_id" not in message for message in normalized)
-    assert normalized[0]["content"] == "system context"
-    assert normalized[1]["content"] == "tool response"
-    assert normalized[2]["content"] == "assistant answer"
-    assert normalized[2]["parts"][1]["type"] == "tool"
-    assert normalized[2]["parts"][1]["tool_name"] == "read_file"
+    assert normalized[0]["parts"] == [{"type": "text", "text": "system context"}]
+    assert normalized[1]["parts"] == [{"type": "text", "text": "tool response"}]
+    assert "content" not in normalized[2]
+    assert normalized[2]["parts"][0]["type"] == "tool"
+    assert normalized[2]["parts"][0]["tool_name"] == "read_file"
+    assert "content" not in normalized[3]
+    assert normalized[3]["parts"] == [{"type": "text", "text": "assistant answer"}]
 
 
 @pytest.mark.asyncio

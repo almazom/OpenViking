@@ -18,6 +18,7 @@ from openviking.storage.vectordb.collection.volcengine_clients import (
     ClientForConsoleApi,
     ClientForDataApi,
 )
+from openviking.utils.search_filters import VALID_TIME_FIELDS
 from openviking_cli.utils.logger import default_logger as logger
 
 
@@ -120,18 +121,6 @@ class VolcengineCollection(ICollection):
         return ConnectionError(
             f"Request to {action} failed: {response.status_code} {code} {message}"
         )
-
-    @staticmethod
-    def _is_collection_not_found(response: Any, action: str) -> bool:
-        if action != "GetVikingdbCollection" or response.status_code != 404:
-            return False
-        try:
-            result = response.json()
-        except json.JSONDecodeError:
-            return False
-        metadata = result.get("ResponseMetadata", {}) if isinstance(result, dict) else {}
-        error = metadata.get("Error", {}) if isinstance(metadata, dict) else {}
-        return error.get("Code") == "NotFound.VikingdbCollection"
 
     def _console_post(self, data: Dict[str, Any], action: str):
         params = {"Action": action, "Version": VIKING_DB_VERSION}
@@ -267,9 +256,29 @@ class VolcengineCollection(ICollection):
                 sanitized_list.append(y)
         return sanitized_list
 
+    @classmethod
+    def _normalize_date_time_filter(cls, obj: Any) -> Any:
+        """Rewrite ``range`` nodes on date_time fields to VikingDB ``time_range``.
+
+        OpenViking compiles ``TimeRange`` down to the internal ``range`` DSL, but the
+        commercial data-plane expects ``time_range`` for date_time fields and ``range``
+        only for numeric fields. Numeric ``range`` nodes are left untouched.
+        """
+        if isinstance(obj, list):
+            return [cls._normalize_date_time_filter(item) for item in obj]
+        if not isinstance(obj, dict):
+            return obj
+
+        normalized = {key: cls._normalize_date_time_filter(value) for key, value in obj.items()}
+        if normalized.get("op") == "range" and normalized.get("field") in VALID_TIME_FIELDS:
+            normalized["op"] = "time_range"
+        return normalized
+
     def _data_post(self, path: str, data: Dict[str, Any]):
         # Centralized sanitization at the request exit, covering all data API inputs
         safe_data = self._sanitize_payload(data)
+        if isinstance(safe_data, dict) and "filter" in safe_data:
+            safe_data["filter"] = self._normalize_date_time_filter(safe_data["filter"])
         response = self.data_client.do_req("POST", path, req_body=safe_data)
         if response.status_code != 200:
             logger.error(f"Request to {path} failed: {response.text}")

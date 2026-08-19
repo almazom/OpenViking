@@ -2,10 +2,19 @@
 # SPDX-License-Identifier: AGPL-3.0
 """End-to-end tests for /api/v1/snapshot/*."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
 import pytest
 import pytest_asyncio
 
-import httpx
+from openviking.server.auth import get_request_context
+from openviking.server.app import create_app
+from openviking.server.config import ServerConfig
+from openviking.server.identity import RequestContext, Role
+from openviking_cli.exceptions import InvalidArgumentError, InvalidURIError
+from openviking_cli.session.user_id import UserIdentifier
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,6 +30,24 @@ async def client_with_no_repo(app):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
+
+
+@pytest_asyncio.fixture(scope="function")
+async def snapshot_router_client():
+    """Production app without running its service-initializing lifespan."""
+    app = create_app(
+        config=ServerConfig(),
+        service=SimpleNamespace(sessions=None),
+    )
+
+    async def request_context_override():
+        return RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    app.dependency_overrides[get_request_context] = request_context_override
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        yield client
 
 
 async def test_commit_creates_snapshot(client_with_resource):
@@ -56,6 +83,84 @@ async def test_log_empty_repo_returns_404(client_with_no_repo):
     resp = await client.get("/api/v1/snapshot/log", params={"branch": "main", "limit": 5})
     assert resp.status_code == 404
     assert resp.json()["status"] == "error"
+
+
+async def test_log_value_error_is_mapped(monkeypatch):
+    from openviking.server.routers import snapshot
+
+    fake_service = SimpleNamespace(
+        fs=SimpleNamespace(
+            log=AsyncMock(
+                side_effect=ValueError("git tree path cannot be the account root: 'viking://'")
+            )
+        )
+    )
+    monkeypatch.setattr(snapshot, "get_service", lambda: fake_service)
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    with pytest.raises((InvalidArgumentError, InvalidURIError)):
+        await snapshot.log(branch="main", limit=5, paths=["viking://"], _ctx=ctx)
+
+
+async def test_log_rejects_more_than_32_raw_path_parameters(snapshot_router_client, monkeypatch):
+    from openviking.server.routers import snapshot
+
+    log_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        snapshot,
+        "get_service",
+        lambda: SimpleNamespace(fs=SimpleNamespace(log=log_mock)),
+    )
+    params = [("paths", "viking://resources/a.md")] * 33
+
+    response = await snapshot_router_client.get("/api/v1/snapshot/log", params=params)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
+    log_mock.assert_not_awaited()
+
+
+async def test_log_accepts_32_raw_path_parameters(snapshot_router_client, monkeypatch):
+    from openviking.server.routers import snapshot
+
+    log_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        snapshot,
+        "get_service",
+        lambda: SimpleNamespace(fs=SimpleNamespace(log=log_mock)),
+    )
+    params = [("paths", f"viking://resources/{index}.md") for index in range(32)]
+
+    response = await snapshot_router_client.get("/api/v1/snapshot/log", params=params)
+
+    assert response.status_code == 200
+    forwarded_paths = log_mock.await_args.kwargs["paths"]
+    assert len(forwarded_paths) == 32
+
+
+async def test_log_scan_limit_error_maps_to_invalid_argument(monkeypatch):
+    from openviking.pyagfs.exceptions import AGFSInvalidOperationError
+    from openviking.server.routers import snapshot
+
+    fake_service = SimpleNamespace(
+        fs=SimpleNamespace(
+            log=AsyncMock(
+                side_effect=AGFSInvalidOperationError(
+                    "snapshot log scan limit exceeded: scanned 1000/1000 commits"
+                )
+            )
+        )
+    )
+    monkeypatch.setattr(snapshot, "get_service", lambda: fake_service)
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    with pytest.raises(InvalidArgumentError, match="scan limit exceeded"):
+        await snapshot.log(
+            branch="main",
+            limit=1,
+            paths=["viking://resources/missing.md"],
+            _ctx=ctx,
+        )
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -131,6 +236,31 @@ async def test_show_blob_returns_binary_with_headers(client_with_resource_and_bl
     assert resp.content == expected_bytes
 
 
+async def test_show_blob_can_hide_memory_fields(snapshot_router_client, monkeypatch):
+    from openviking.server.routers import snapshot
+
+    stored = b'visible content\n\n<!-- MEMORY_FIELDS\n{"version": 2}\n-->'
+    show_mock = AsyncMock(return_value={"oid": "a" * 40, "size": len(stored), "bytes": stored})
+    monkeypatch.setattr(
+        snapshot,
+        "get_service",
+        lambda: SimpleNamespace(fs=SimpleNamespace(show_blob_raw=show_mock)),
+    )
+
+    response = await snapshot_router_client.get(
+        "/api/v1/snapshot/show",
+        params={
+            "target_ref": "a" * 40,
+            "path": "viking://user/default/memories/experiences/example.md",
+            "raw": "false",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"visible content"
+    assert response.headers["x-snapshot-size"] == str(len(response.content))
+
+
 async def test_show_path_not_found_returns_404(client_with_resource):
     client, _ = client_with_resource
     commit = (await client.post("/api/v1/snapshot/commit", json={"message": "for 404"})).json()["result"]
@@ -140,6 +270,167 @@ async def test_show_path_not_found_returns_404(client_with_resource):
     )
     assert resp.status_code == 404
     assert resp.json()["status"] == "error"
+
+
+async def test_diff_returns_unified_diff_for_path(client_with_resource, service):
+    client, _ = client_with_resource
+    path = "viking://resources/snapshot_diff_fixture.md"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    await service.viking_fs.write_file(path, b"# Title\n\nold line\n", ctx=ctx)
+    from_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff v1", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    await service.viking_fs.write_file(path, b"# Title\n\nnew line\n", ctx=ctx)
+    to_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff v2", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    response = await client.get(
+        "/api/v1/snapshot/diff",
+        params={"path": path, "from": from_commit, "to": to_commit},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["path"] == path
+    assert result["from_commit"] == from_commit
+    assert result["to_commit"] == to_commit
+    assert result["change_type"] == "modified"
+    assert "-old line" in result["diff_text"]
+    assert "+new line" in result["diff_text"]
+
+
+async def test_diff_supports_first_version_without_from_commit(client_with_resource, service):
+    client, _ = client_with_resource
+    path = "viking://resources/snapshot_diff_added_fixture.md"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    await service.viking_fs.write_file(path, b"first version\n", ctx=ctx)
+    to_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff added", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    response = await client.get(
+        "/api/v1/snapshot/diff",
+        params={"path": path, "to": to_commit},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["from_commit"] == ""
+    assert result["to_commit"] == to_commit
+    assert result["change_type"] == "added"
+    assert "+first version" in result["diff_text"]
+
+
+async def test_diff_reports_missing_final_newline(client_with_resource, service):
+    client, _ = client_with_resource
+    path = "viking://resources/snapshot_diff_newline_fixture.md"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    await service.viking_fs.write_file(path, b"same line\n", ctx=ctx)
+    from_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff newline v1", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    await service.viking_fs.write_file(path, b"same line", ctx=ctx)
+    to_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff newline v2", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    response = await client.get(
+        "/api/v1/snapshot/diff",
+        params={"path": path, "from": from_commit, "to": to_commit},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["change_type"] == "modified"
+    assert "-same line" in result["diff_text"]
+    assert "+same line" in result["diff_text"]
+    assert "\\ No newline at end of file" in result["diff_text"]
+
+
+async def test_diff_reports_deleted_path(client_with_resource, service):
+    client, _ = client_with_resource
+    path = "viking://resources/snapshot_diff_deleted_fixture.md"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    await service.viking_fs.write_file(path, b"deleted content\n", ctx=ctx)
+    from_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff deleted v1", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    await service.viking_fs.rm(path, ctx=ctx)
+    to_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff deleted v2", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    response = await client.get(
+        "/api/v1/snapshot/diff",
+        params={"path": path, "from": from_commit, "to": to_commit},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["change_type"] == "deleted"
+    assert "-deleted content" in result["diff_text"]
+
+
+async def test_diff_reports_unchanged_path(client_with_resource, service):
+    client, _ = client_with_resource
+    path = "viking://resources/snapshot_diff_unchanged_fixture.md"
+    other_path = "viking://resources/snapshot_diff_other_fixture.md"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+    await service.viking_fs.write_file(path, b"unchanged content\n", ctx=ctx)
+    from_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff unchanged v1", "paths": [path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    await service.viking_fs.write_file(other_path, b"advance snapshot\n", ctx=ctx)
+    to_commit = (
+        await client.post(
+            "/api/v1/snapshot/commit",
+            json={"message": "snapshot diff unchanged v2", "paths": [other_path]},
+        )
+    ).json()["result"]["commit_oid"]
+
+    response = await client.get(
+        "/api/v1/snapshot/diff",
+        params={"path": path, "from": from_commit, "to": to_commit},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["change_type"] == "unchanged"
+    assert result["diff_text"] == ""
 
 
 # ---------------------------------------------------------------------------
