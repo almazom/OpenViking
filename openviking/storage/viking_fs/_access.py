@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 from openviking.core.context import ContextLevel
 from openviking.core.namespace import (
-    canonicalize_uri,
     is_accessible as namespace_is_accessible,
 )
 from openviking.core.namespace import (
@@ -134,19 +133,6 @@ class _AccessMixin:
 
         return parts
 
-    @staticmethod
-    def _normalize_uri(uri: str) -> str:
-        """Normalize short-format URIs to the canonical viking:// form."""
-        if uri.startswith("viking://"):
-            return uri
-        return VikingURI.normalize(uri)
-
-    @classmethod
-    def _normalized_uri_parts(cls, uri: str) -> tuple[str, List[str]]:
-        """Normalize a URI and reject ambiguous or platform-specific traversal forms."""
-        normalized = cls._normalize_uri(uri)
-        return normalized, cls._safe_uri_parts(normalized)
-
     # TODO: Once pathlock moves down into ragfs, stop reconstructing the
     # encrypted mount-relative path in Python and derive the lock target from
     # the same backend-side source of truth.
@@ -193,8 +179,8 @@ class _AccessMixin:
         normalized: Dict[str, Optional[str]] = {}
         for uri in uris:
             try:
-                normalized_uri = self._normalized_uri_parts(uri)[0]
-                normalized[uri] = canonicalize_uri(normalized_uri, real_ctx)
+                self._safe_uri_parts(uri)
+                normalized[uri] = uri
             except ValueError:
                 normalized[uri] = None
 
@@ -267,7 +253,8 @@ class _AccessMixin:
 
         self._ensure_user_not_deleting(real_ctx)
         for uri in uris:
-            normalized_uri = canonicalize_uri(self._normalized_uri_parts(uri)[0], real_ctx)
+            self._safe_uri_parts(uri)
+            normalized_uri = uri
             if normalized_uri == "viking://" and real_ctx.role == Role.USER:
                 raise PermissionDeniedError(
                     "Writing the account root requires an administrator",
@@ -300,7 +287,8 @@ class _AccessMixin:
         self, uri: str, ctx: Optional[RequestContext]
     ) -> None:
         real_ctx = self._ctx_or_default(ctx)
-        normalized_uri = canonicalize_uri(self._normalized_uri_parts(uri)[0], real_ctx)
+        self._safe_uri_parts(uri)
+        normalized_uri = uri
         if getattr(self, "acl_manager", None) is not None:
             try:
                 acl_ancestors(normalized_uri)
@@ -315,7 +303,8 @@ class _AccessMixin:
         if self.acl_manager is None:
             raise RuntimeError("ACL is not initialized")
         real_ctx = self._ctx_or_default(ctx)
-        normalized_uri = canonicalize_uri(self._normalized_uri_parts(uri)[0], real_ctx)
+        self._safe_uri_parts(uri)
+        normalized_uri = uri
         acl_ancestors(normalized_uri)
         if is_implicit_manager(real_ctx, normalized_uri):
             return normalized_uri, real_ctx
@@ -343,14 +332,15 @@ class _AccessMixin:
         entries: Sequence[AclEntry | Mapping[str, Any]],
         ctx: RequestContext,
     ) -> Dict[str, Any]:
-        from openviking.storage.transaction import LockContext, get_lock_manager
-
         path = self._uri_to_path(uri, ctx=ctx)
-        async with LockContext(get_lock_manager(), [path], lock_mode="tree"):
+        lease = await self._async_agfs.pathlock_acquire_tree(path)
+        try:
             await self._ensure_acl_manage(uri, ctx)
             await self._acl_target_stat(uri, ctx)
             effective = await self.acl_manager.set_direct(uri, entries, ctx)
             return self.acl_manager.to_report(uri, effective)
+        finally:
+            await self._async_agfs.pathlock_release(lease)
 
     async def set_acl(
         self,
@@ -388,10 +378,9 @@ class _AccessMixin:
         principal = normalize_acl_principal(principal)
         normalized_level = normalize_acl_level(level) if level is not None else None
         normalized_uri, real_ctx = await self._ensure_acl_manage(uri, ctx)
-        from openviking.storage.transaction import LockContext, get_lock_manager
-
         path = self._uri_to_path(normalized_uri, ctx=real_ctx)
-        async with LockContext(get_lock_manager(), [path], lock_mode="tree"):
+        lease = await self._async_agfs.pathlock_acquire_tree(path)
+        try:
             await self._ensure_acl_manage(normalized_uri, real_ctx)
             await self._acl_target_stat(normalized_uri, real_ctx)
             direct = await self.acl_manager.get_direct(normalized_uri, real_ctx)
@@ -409,6 +398,8 @@ class _AccessMixin:
                 real_ctx,
             )
             return self.acl_manager.to_report(normalized_uri, effective)
+        finally:
+            await self._async_agfs.pathlock_release(lease)
 
     async def delete_acl(self, uri: str, ctx: Optional[RequestContext] = None) -> Dict[str, Any]:
         return await self.set_acl(uri, [], ctx=ctx)

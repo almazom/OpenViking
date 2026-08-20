@@ -7,7 +7,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from openviking.core.identifiers import validate_identifier_part, validate_user_id
-from openviking.core.namespace import canonicalize_uri, uri_parts
+from openviking.core.namespace import uri_parts
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.expr import Or, PathScope
 from openviking_cli.exceptions import InvalidArgumentError
@@ -292,15 +292,14 @@ class AclManager:
         return records
 
     async def get_direct(self, uri: str, ctx: RequestContext) -> DirectAcl:
-        canonical_uri = canonicalize_uri(uri, ctx)
-        acl_ancestors(canonical_uri)
-        records = await self._records_for_uris([canonical_uri], ctx)
+        acl_ancestors(uri)
+        records = await self._records_for_uris([uri], ctx)
         return self._effective_from_records(records).direct
 
     async def resolve_many(
         self, uris: Iterable[str], ctx: RequestContext
     ) -> dict[str, EffectiveAcl]:
-        canonical_uris = list(dict.fromkeys(canonicalize_uri(uri, ctx) for uri in uris))
+        canonical_uris = list(dict.fromkeys(uris))
         paths = {uri: acl_ancestors(uri) for uri in canonical_uris}
         exact_records = await self._records_for_uris(canonical_uris, ctx)
         exact_groups = self._group_by_uri(exact_records)
@@ -333,8 +332,7 @@ class AclManager:
         return result
 
     async def resolve(self, uri: str, ctx: RequestContext) -> EffectiveAcl:
-        canonical_uri = canonicalize_uri(uri, ctx)
-        return (await self.resolve_many([canonical_uri], ctx))[canonical_uri]
+        return (await self.resolve_many([uri], ctx))[uri]
 
     async def materialize_context_records(
         self, records: Sequence[dict[str, Any]], ctx: RequestContext
@@ -344,7 +342,7 @@ class AclManager:
             uri = record.get("uri")
             if not uri:
                 continue
-            canonical = canonicalize_uri(str(uri), ctx)
+            canonical = str(uri)
             try:
                 acl_ancestors(canonical)
             except InvalidArgumentError:
@@ -449,10 +447,9 @@ class AclManager:
         return effective_by_uri[root_uri]
 
     async def refresh_context_subtree(self, uri: str, ctx: RequestContext) -> None:
-        canonical_uri = canonicalize_uri(uri, ctx)
-        records = await self._subtree_records(canonical_uri, ctx)
+        records = await self._subtree_records(uri, ctx)
         if records:
-            await self._apply_subtree(canonical_uri, records, ctx)
+            await self._apply_subtree(uri, records, ctx)
 
     async def set_direct(
         self,
@@ -460,12 +457,11 @@ class AclManager:
         entries: Sequence[AclEntry | Mapping[str, Any]],
         ctx: RequestContext,
     ) -> EffectiveAcl:
-        canonical_uri = canonicalize_uri(uri, ctx)
         proposed = entries_to_direct(entries)
-        old_records = await self._subtree_records(canonical_uri, ctx)
+        old_records = await self._subtree_records(uri, ctx)
         try:
             effective = await self._apply_subtree(
-                canonical_uri, old_records, ctx, root_direct=proposed
+                uri, old_records, ctx, root_direct=proposed
             )
         except Exception:
             if old_records:
@@ -488,5 +484,4 @@ class AclManager:
         }
 
     async def report(self, uri: str, ctx: RequestContext) -> dict[str, Any]:
-        canonical_uri = canonicalize_uri(uri, ctx)
-        return self.to_report(canonical_uri, await self.resolve(canonical_uri, ctx))
+        return self.to_report(uri, await self.resolve(uri, ctx))

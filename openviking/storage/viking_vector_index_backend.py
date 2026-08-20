@@ -1543,7 +1543,7 @@ class VikingVectorIndexBackend:
             }
             if self.acl_manager:
                 updated.update(
-                    await self.acl_manager.materialize_moved_record(record, canonical_new_uri, ctx)
+                    await self.acl_manager.materialize_moved_record(record, new_uri, ctx)
                 )
             vector = updated.get("vector")
             if not vector:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel, ConfigDict
 
 from openviking.core.path_variables import resolve_path_variables
+from openviking.core.uri_validation import validate_request_viking_uri
 from openviking.server.auth import get_request_context
 from openviking.server.dependencies import get_service
 from openviking.server.identity import RequestContext
@@ -43,7 +44,8 @@ async def get_acl(
     uri: str = Query(..., description="Viking URI"),
     _ctx: RequestContext = Depends(get_request_context),
 ):
-    result = await get_service().fs.get_acl(resolve_path_variables(uri), ctx=_ctx)
+    uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
+    result = await get_service().fs.get_acl(uri, ctx=_ctx)
     return Response(status="ok", result=result)
 
 
@@ -52,8 +54,9 @@ async def set_acl(
     request: SetAclRequest = Body(...),
     _ctx: RequestContext = Depends(get_request_context),
 ):
+    uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
     result = await get_service().fs.set_acl(
-        resolve_path_variables(request.uri),
+        uri,
         [entry.model_dump() for entry in request.entries],
         ctx=_ctx,
     )
@@ -65,7 +68,8 @@ async def delete_acl(
     uri: str = Query(..., description="Viking URI"),
     _ctx: RequestContext = Depends(get_request_context),
 ):
-    result = await get_service().fs.delete_acl(resolve_path_variables(uri), ctx=_ctx)
+    uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
+    result = await get_service().fs.delete_acl(uri, ctx=_ctx)
     return Response(status="ok", result=result)
 
 
@@ -74,8 +78,9 @@ async def grant_acl(
     request: GrantAclRequest = Body(...),
     _ctx: RequestContext = Depends(get_request_context),
 ):
+    uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
     result = await get_service().fs.grant_acl(
-        resolve_path_variables(request.uri),
+        uri,
         request.principal,
         request.level,
         ctx=_ctx,
@@ -88,7 +93,6 @@ async def revoke_acl(
     request: RevokeAclRequest = Body(...),
     _ctx: RequestContext = Depends(get_request_context),
 ):
-    result = await get_service().fs.revoke_acl(
-        resolve_path_variables(request.uri), request.principal, ctx=_ctx
-    )
+    uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
+    result = await get_service().fs.revoke_acl(uri, request.principal, ctx=_ctx)
     return Response(status="ok", result=result)

@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from openviking.core.namespace import canonicalize_uri, may_include_hidden_actor_peers, uri_parts
+from openviking.core.namespace import may_include_hidden_actor_peers, uri_parts
 from openviking.pyagfs.exceptions import (
     AGFSClientError,
     AGFSDirectoryNotEmptyError,
@@ -250,10 +250,7 @@ class _OpsMixin:
         old_path = self._uri_to_path(old_uri, ctx=ctx)
         new_path = self._uri_to_path(new_uri, ctx=ctx)
         target_uri = self._path_to_uri(old_path, ctx=ctx)
-        canonical_new_uri = canonicalize_uri(new_uri, self._ctx_or_default(ctx))
-        new_acl_scope = acl_manager is not None and uri_parts(canonical_new_uri)[:1] == [
-            "resources"
-        ]
+        new_acl_scope = acl_manager is not None and uri_parts(new_uri)[:1] == ["resources"]
 
         # Verify source exists and determine type before locking.
         try:
@@ -355,7 +352,7 @@ class _OpsMixin:
                 )
                 if acl_manager and new_acl_scope:
                     await acl_manager.refresh_context_subtree(
-                        canonical_new_uri,
+                        new_uri,
                         self._ctx_or_default(ctx),
                     )
             except Exception:

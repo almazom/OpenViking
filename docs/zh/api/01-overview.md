@@ -488,6 +488,12 @@ JSON 输出 - 错误：
 | DELETE | `/api/v1/admin/accounts/{account_id}/users/{user_id}` | 移除用户 |
 | PUT | `/api/v1/admin/accounts/{account_id}/users/{user_id}/role` | 将用户提升为 ADMIN |
 | POST | `/api/v1/admin/accounts/{account_id}/users/{user_id}/key` | 重新生成用户 Key |
+| POST | `/api/v1/admin/accounts/{account_id}/groups` | 创建用户组 |
+| GET | `/api/v1/admin/accounts/{account_id}/groups` | 列出用户组 |
+| DELETE | `/api/v1/admin/accounts/{account_id}/groups/{group_id}` | 删除用户组 |
+| GET | `/api/v1/admin/accounts/{account_id}/groups/{group_id}/members` | 列出用户组成员 |
+| PUT | `/api/v1/admin/accounts/{account_id}/groups/{group_id}/members/{user_id}` | 添加用户组成员 |
+| DELETE | `/api/v1/admin/accounts/{account_id}/groups/{group_id}/members/{user_id}` | 移除用户组成员 |
 | GET | `/api/v1/privacy-configs` | 列出隐私配置分类 |
 | GET | `/api/v1/privacy-configs/{category}` | 列出分类目标 |
 | GET | `/api/v1/privacy-configs/{category}/{target_key}` | 获取生效配置 |

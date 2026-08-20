@@ -720,31 +720,25 @@ class FSService:
         )
 
     async def get_acl(self, uri: str, ctx: RequestContext) -> Dict[str, Any]:
-        return await self._ensure_initialized().get_acl(validate_viking_uri(uri), ctx=ctx)
+        return await self._ensure_initialized().get_acl(uri, ctx=ctx)
 
     async def set_acl(
         self, uri: str, entries: List[Dict[str, str]], ctx: RequestContext
     ) -> Dict[str, Any]:
-        return await self._ensure_initialized().set_acl(
-            validate_viking_uri(uri), entries, ctx=ctx
-        )
+        return await self._ensure_initialized().set_acl(uri, entries, ctx=ctx)
 
     async def grant_acl(
         self, uri: str, principal: str, level: str, ctx: RequestContext
     ) -> Dict[str, Any]:
-        return await self._ensure_initialized().grant_acl(
-            validate_viking_uri(uri), principal, level, ctx=ctx
-        )
+        return await self._ensure_initialized().grant_acl(uri, principal, level, ctx=ctx)
 
     async def revoke_acl(
         self, uri: str, principal: str, ctx: RequestContext
     ) -> Dict[str, Any]:
-        return await self._ensure_initialized().revoke_acl(
-            validate_viking_uri(uri), principal, ctx=ctx
-        )
+        return await self._ensure_initialized().revoke_acl(uri, principal, ctx=ctx)
 
     async def delete_acl(self, uri: str, ctx: RequestContext) -> Dict[str, Any]:
-        return await self._ensure_initialized().delete_acl(validate_viking_uri(uri), ctx=ctx)
+        return await self._ensure_initialized().delete_acl(uri, ctx=ctx)
 
     async def commit(
         self,
