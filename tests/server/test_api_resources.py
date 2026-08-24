@@ -120,9 +120,8 @@ async def test_add_resource_success(
     assert "time" not in body
     assert "usage" not in body
     assert "telemetry" not in body
-    assert body["result"]["status"] == "success"
+    assert body["result"]["status"] == "accepted"
     assert body["result"]["root_uri"].startswith("viking://")
-    assert "source_path" in body["result"]
     assert body["result"]["task_id"]
 
 
@@ -1018,7 +1017,7 @@ async def test_add_resource_non_wait_returns_queue_task_id(
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["result"]["status"] == "success"
+    assert body["result"]["status"] == "accepted"
     assert "task_id" in body["result"]
     assert body["result"]["task_id"]
     assert body["result"]["root_uri"].startswith("viking://")

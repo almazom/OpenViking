@@ -618,13 +618,43 @@ class _AccessMixin:
                 ):
                     break
 
+            expose_resource_names = bool(
+                getattr(self, "acl_manager", None) is not None
+                and self._safe_uri_parts(uri)[:1] == ["resources"]
+            )
             if getattr(self, "acl_manager", None) is None:
                 visible = candidates
             else:
                 access = await self._can_access_many(
                     [entry_uri for _, entry_uri in candidates], real_ctx
                 )
-                visible = [item for item in candidates if access.get(item[1], False)]
+                if expose_resource_names:
+                    denied_directories = {
+                        entry["path"].rstrip("/")
+                        for entry, entry_uri in candidates
+                        if entry.get("info", {}).get("isDir", False)
+                        and not access.get(entry_uri, False)
+                    }
+                    visible = []
+                    base = path.rstrip("/")
+                    for entry, entry_uri in candidates:
+                        parent = entry["path"].rstrip("/").rsplit("/", 1)[0]
+                        blocked = False
+                        while parent.startswith(f"{base}/"):
+                            if parent in denied_directories:
+                                blocked = True
+                                break
+                            parent = parent.rsplit("/", 1)[0]
+                        if blocked:
+                            continue
+                        if access.get(entry_uri, False):
+                            visible.append((entry, entry_uri))
+                        else:
+                            denied_entry = dict(entry)
+                            denied_entry["access"] = "denied"
+                            visible.append((denied_entry, entry_uri))
+                else:
+                    visible = [item for item in candidates if access.get(item[1], False)]
             if node_limit is not None:
                 visible = visible[:node_limit]
 

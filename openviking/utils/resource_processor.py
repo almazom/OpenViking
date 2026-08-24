@@ -25,6 +25,7 @@ from openviking.resource.processing_mode import (
     normalize_processing_mode,
 )
 from openviking.server.identity import RequestContext
+from openviking.storage.acl import AclAction
 from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.expr import And, Eq, PathScope
 from openviking.storage.internal_names import STORAGE_INTERNAL_ENTRY_NAMES
@@ -770,6 +771,7 @@ class ResourceProcessor:
 
         viking_fs = get_viking_fs()
         last_busy_error: Optional[ResourceBusyError] = None
+        await self.ensure_candidate_parent_write_access(candidate_uri=candidate_uri, ctx=ctx)
 
         for attempt in range(max_attempts + 1):
             root_uri = candidate_uri if attempt == 0 else f"{candidate_uri}_{attempt}"
@@ -800,6 +802,22 @@ class ResourceProcessor:
 
         raise FileExistsError(
             f"Cannot resolve unique name for {candidate_uri} after {max_attempts} attempts"
+        )
+
+    async def ensure_candidate_parent_write_access(
+        self,
+        *,
+        candidate_uri: str,
+        ctx: RequestContext,
+    ) -> None:
+        """Require create permission for an auto-named resource candidate."""
+        parent_uri = VikingURI(candidate_uri).parent
+        if parent_uri is None:
+            raise ValueError(f"Resource candidate must have a parent: {candidate_uri}")
+        await get_viking_fs()._ensure_access(
+            parent_uri.uri,
+            ctx,
+            action=AclAction.WRITE,
         )
 
     @staticmethod

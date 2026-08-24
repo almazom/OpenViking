@@ -603,20 +603,25 @@ class _OpsMixin:
         return result
 
     async def exists(self, uri: str, ctx: Optional[RequestContext] = None) -> bool:
-        """Check if a URI exists.
+        """Check whether a URI is physically present in the caller's namespace.
 
-        Args:
-            uri: Viking URI
-            ctx: Request context
-
-        Returns:
-            bool: True if the URI exists, False otherwise
+        Resource ACLs control access to content, not namespace occupancy.  In
+        particular, auto-naming must not treat an occupied but unreadable URI
+        as available.  Namespace isolation still applies to private user,
+        actor-peer, upload, and internal paths.
         """
-        try:
-            await self.stat(uri, ctx=ctx)
-            return True
-        except Exception:
+        real_ctx = self._ctx_or_default(ctx)
+        self._safe_uri_parts(uri)
+        if not self._is_accessible(uri, real_ctx):
             return False
+
+        primary_path = self._uri_to_path(uri, ctx=ctx)
+        for candidate_path in self._read_paths(uri, ctx=ctx):
+            if not await self._read_path_visible(uri, candidate_path, primary_path, real_ctx):
+                continue
+            if await self._agfs_path_exists(candidate_path):
+                return True
+        return self._is_session_root_uri(uri)
 
     async def glob(
         self,
@@ -806,16 +811,29 @@ class _OpsMixin:
             ctx=ctx,
         ):
             info = entry["info"]
+            if entry.get("access") == "denied":
+                result.append(
+                    {
+                        "name": info["name"],
+                        "isDir": info["isDir"],
+                        "rel_path": entry["rel_path"],
+                        "uri": entry_uri,
+                        "access": "denied",
+                    }
+                )
+                continue
             new_entry = dict(entry.get("extra", {}))
-            new_entry.update({
-                "name": info["name"],
-                "size": info["size"],
-                "mode": info["mode"],
-                "modTime": info["modTime"],
-                "isDir": info["isDir"],
-                "rel_path": entry["rel_path"],
-                "uri": entry_uri,
-            })
+            new_entry.update(
+                {
+                    "name": info["name"],
+                    "size": info["size"],
+                    "mode": info["mode"],
+                    "modTime": info["modTime"],
+                    "isDir": info["isDir"],
+                    "rel_path": entry["rel_path"],
+                    "uri": entry_uri,
+                }
+            )
             result.append(new_entry)
         return result
 
@@ -840,15 +858,31 @@ class _OpsMixin:
         ):
             info = entry["info"]
             is_dir = info["isDir"]
-            result.append({
-                "uri": entry_uri,
-                "size": 0 if is_dir else info["size"],
-                "isDir": is_dir,
-                "modTime": format_iso8601(parse_iso_datetime(info["modTime"])),
-                "rel_path": entry["rel_path"],
-            })
+            if entry.get("access") == "denied":
+                result.append(
+                    {
+                        "uri": entry_uri,
+                        "isDir": is_dir,
+                        "rel_path": entry["rel_path"],
+                        "access": "denied",
+                    }
+                )
+                continue
+            result.append(
+                {
+                    "uri": entry_uri,
+                    "size": 0 if is_dir else info["size"],
+                    "isDir": is_dir,
+                    "modTime": format_iso8601(parse_iso_datetime(info["modTime"])),
+                    "rel_path": entry["rel_path"],
+                }
+            )
 
-        await self._batch_fetch_abstracts(result, abs_limit, ctx=ctx)
+        await self._batch_fetch_abstracts(
+            [entry for entry in result if entry.get("access") != "denied"],
+            abs_limit,
+            ctx=ctx,
+        )
 
         return result
 
@@ -1255,13 +1289,24 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
     ) -> List[Dict[str, Any]]:
         """List directory contents (URI version)."""
-        entry_items = await self._list_read_path_items(uri, ctx=ctx)
+        entry_items = await self._ls_browsable_items(uri, ctx=ctx)
         entry_items = self._sort_ls_entry_items(entry_items, sort_by, sort_order)
         # basic info
         fallback_time = datetime.now(timezone.utc)
         all_entries = []
         for entry, entry_uri in entry_items:
             name = entry.get("name", "")
+            if entry.get("access") == "denied":
+                if entry.get("isDir") or not name.startswith(".") or show_all_hidden:
+                    all_entries.append(
+                        {
+                            "name": name,
+                            "uri": entry_uri,
+                            "isDir": bool(entry.get("isDir", False)),
+                            "access": "denied",
+                        }
+                    )
+                continue
             raw_time = entry.get("modTime", "")
             parsed_time = fallback_time
             if isinstance(raw_time, (int, float)):
@@ -1286,11 +1331,12 @@ class _OpsMixin:
                 all_entries.append(new_entry)
             elif show_all_hidden:
                 all_entries.append(new_entry)
-        access = await self._can_access_many([entry["uri"] for entry in all_entries], ctx)
-        all_entries = [entry for entry in all_entries if access.get(entry["uri"], False)][
-            :node_limit
-        ]
-        await self._batch_fetch_abstracts(all_entries, abs_limit, ctx=ctx)
+        all_entries = all_entries[:node_limit]
+        await self._batch_fetch_abstracts(
+            [entry for entry in all_entries if entry.get("access") != "denied"],
+            abs_limit,
+            ctx=ctx,
+        )
         return all_entries
 
     async def _ls_original(
@@ -1303,25 +1349,59 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
     ) -> List[Dict[str, Any]]:
         """List directory contents (URI version)."""
-        try:
-            entry_items = await self._list_read_path_items(uri, ctx=ctx)
-            entry_items = self._sort_ls_entry_items(entry_items, sort_by, sort_order)
-            # AGFS returns read-only structure, need to create new dict
-            all_entries = []
-            for entry, entry_uri in entry_items:
-                name = entry.get("name", "")
-                new_entry = dict(entry)  # Copy original data
+        entry_items = await self._ls_browsable_items(uri, ctx=ctx)
+        entry_items = self._sort_ls_entry_items(entry_items, sort_by, sort_order)
+        # AGFS returns read-only structure, need to create new dict
+        all_entries = []
+        for entry, entry_uri in entry_items:
+            name = entry.get("name", "")
+            if entry.get("access") == "denied":
+                new_entry = {
+                    "name": name,
+                    "isDir": bool(entry.get("isDir", False)),
+                    "uri": entry_uri,
+                    "access": "denied",
+                }
+            else:
+                new_entry = dict(entry)
                 new_entry["uri"] = entry_uri
-                if entry.get("isDir"):
-                    all_entries.append(new_entry)
-                elif not name.startswith("."):
-                    all_entries.append(new_entry)
-                elif show_all_hidden:
-                    all_entries.append(new_entry)
-            access = await self._can_access_many([entry["uri"] for entry in all_entries], ctx)
-            return [entry for entry in all_entries if access.get(entry["uri"], False)][:node_limit]
-        except Exception:
-            raise NotFoundError(uri, "directory")
+            if entry.get("isDir"):
+                all_entries.append(new_entry)
+            elif not name.startswith("."):
+                all_entries.append(new_entry)
+            elif show_all_hidden:
+                all_entries.append(new_entry)
+        return all_entries[:node_limit]
+
+    async def _ls_browsable_items(
+        self,
+        uri: str,
+        ctx: Optional[RequestContext] = None,
+    ) -> List[tuple[Dict[str, Any], str]]:
+        """Return list entries according to namespace-enumeration semantics."""
+        entry_items = await self._list_read_path_items(uri, ctx=ctx)
+        access = await self._can_access_many([entry_uri for _, entry_uri in entry_items], ctx)
+        expose_resource_names = bool(
+            getattr(self, "acl_manager", None) is not None
+            and self._safe_uri_parts(uri)[:1] == ["resources"]
+        )
+
+        browsable = []
+        for entry, entry_uri in entry_items:
+            if access.get(entry_uri, False):
+                browsable.append((entry, entry_uri))
+            elif expose_resource_names:
+                browsable.append(
+                    (
+                        {
+                            "name": entry.get("name", ""),
+                            "isDir": bool(entry.get("isDir", False)),
+                            "access": "denied",
+                        },
+                        entry_uri,
+                    )
+                )
+        return browsable
 
     async def move_file(
         self,

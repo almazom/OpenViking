@@ -52,6 +52,45 @@ async def test_acl_http_and_operation_levels(
     with pytest.raises(InvalidArgumentError, match="viking://resources"):
         await service.viking_fs.get_acl(private_directory, ctx=owner)
     await service.viking_fs.mv(private_directory, directory, ctx=owner)
+    browse_root = "viking://resources/acl-browse"
+    hidden_directory = f"{browse_root}/restricted"
+    hidden_file_uri = f"{hidden_directory}/hidden.md"
+    await service.viking_fs.mkdir(hidden_directory, ctx=owner)
+    await service.viking_fs.write_file(hidden_file_uri, "hidden", ctx=owner)
+    await _index(
+        service,
+        owner,
+        ("acl-browse-l0", browse_root, 0),
+        ("acl-hidden-l0", hidden_directory, 0),
+        ("acl-hidden-file-l2", hidden_file_uri, 2),
+    )
+    await service.viking_fs.set_acl(
+        hidden_directory,
+        [{"principal": "user:carol", "level": "viewer"}],
+        ctx=owner,
+    )
+
+    assert await service.viking_fs.exists(hidden_directory, ctx=bob)
+    assert await service.viking_fs.ls(browse_root, output="original", ctx=bob) == [
+        {
+            "name": "restricted",
+            "isDir": True,
+            "uri": hidden_directory,
+            "access": "denied",
+        }
+    ]
+    assert await service.viking_fs.tree(browse_root, output="original", ctx=bob) == [
+        {
+            "name": "restricted",
+            "isDir": True,
+            "rel_path": "restricted",
+            "uri": hidden_directory,
+            "access": "denied",
+        }
+    ]
+    with pytest.raises(PermissionDeniedError):
+        await service.viking_fs.stat(hidden_directory, ctx=bob)
+
     app.dependency_overrides[get_request_context] = lambda: owner
 
     try:

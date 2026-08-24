@@ -1,10 +1,11 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
+from openviking.storage.acl import AclAction
 from openviking.storage.errors import ResourceBusyError
 from openviking.utils import resource_processor as resource_processor_module
 from openviking.utils.resource_processor import ResourceProcessor
@@ -13,6 +14,10 @@ from openviking.utils.resource_processor import ResourceProcessor
 class _FakeVikingFS:
     def __init__(self, existing=()):
         self.existing = set(existing)
+        self.access_checks = []
+
+    async def _ensure_access(self, uri, ctx, *, action):
+        self.access_checks.append((uri, ctx, action))
 
     async def exists(self, uri, *, ctx):
         return uri in self.existing
@@ -25,12 +30,12 @@ def _make_processor(monkeypatch, *, existing=()):
     processor = ResourceProcessor.__new__(ResourceProcessor)
     viking_fs = _FakeVikingFS(existing)
     monkeypatch.setattr(resource_processor_module, "get_viking_fs", lambda: viking_fs)
-    return processor
+    return processor, viking_fs
 
 
 @pytest.mark.asyncio
 async def test_reservation_exhaustion_reports_retryable_lock_contention(monkeypatch):
-    processor = _make_processor(monkeypatch)
+    processor, _ = _make_processor(monkeypatch)
     processor.acquire_resource_lock = AsyncMock(
         side_effect=ResourceBusyError(
             "busy",
@@ -60,7 +65,7 @@ async def test_true_auto_name_exhaustion_remains_file_exists(monkeypatch):
         "viking://resources/report_1",
         "viking://resources/report_2",
     }
-    processor = _make_processor(monkeypatch, existing=candidates)
+    processor, _ = _make_processor(monkeypatch, existing=candidates)
     processor.acquire_resource_lock = AsyncMock()
 
     with pytest.raises(FileExistsError):
@@ -75,7 +80,7 @@ async def test_true_auto_name_exhaustion_remains_file_exists(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reservation_returns_first_available_lock(monkeypatch):
-    processor = _make_processor(
+    processor, viking_fs = _make_processor(
         monkeypatch,
         existing={"viking://resources/report"},
     )
@@ -90,3 +95,4 @@ async def test_reservation_returns_first_available_lock(monkeypatch):
 
     assert uri == "viking://resources/report_1"
     assert acquired is lease
+    assert viking_fs.access_checks == [("viking://resources", ANY, AclAction.WRITE)]
