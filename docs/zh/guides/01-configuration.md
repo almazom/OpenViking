@@ -120,7 +120,8 @@ openviking-server doctor
   "vlm": {
     "provider" : "openai-codex",
     "model"    : "gpt-5.4",
-    "api_base" : "https://chatgpt.com/backend-api/codex"
+    "api_base" : "https://chatgpt.com/backend-api/codex",
+    "reasoning_effort": "xhigh"
   }
 }
 ```
@@ -444,7 +445,8 @@ openviking-server doctor
       "provider": "dashscope",
       "api_key": "${DASHSCOPE_API_KEY}",
       "model": "text-embedding-v4",
-      "dimension": 1024
+      "dimension": 1024,
+      "input": "text"
     }
   }
 }
@@ -461,11 +463,11 @@ openviking-server doctor
 | `qwen3-vl-embedding` | 2560 | multimodal | 文本 + 图像 + 视频 |
 | `qwen2.5-vl-embedding` | 1024 | multimodal | 文本 + 图像 + 视频 |
 
-**多模态参数**（仅文本+图像/视频模型支持）:
+**输入和多模态参数**:
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `input_type` | str | `"multimodal"` 或 `"text"` | 嵌入模式（默认: `"multimodal"`） |
+| `input` | str | `"multimodal"` | 嵌入模式：`"text"` 或 `"multimodal"` |
 | `enable_fusion` | bool | `false` | 为 `tongyi-embedding-vision-*` 模型启用融合向量 |
 | `res_level` | int | `2` | 图像分辨率级别（1=高，2=中，3=低） |
 | `max_video_frames` | int | `16` | 视频最大嵌入帧数 |
@@ -477,7 +479,11 @@ openviking-server doctor
 | 中国 | `https://dashscope.aliyuncs.com`（默认） | 推荐中国大陆用户使用 |
 | 国际 | `https://dashscope-intl.aliyuncs.com` | 推荐中国境外用户使用 |
 
-也支持设置完整 URL 来自定义端点地址。
+如果使用自定义网关，`api_base` 应填写网关根地址。OpenViking 会根据
+输入模式自动追加 endpoint 路径，因此不要在 `api_base` 中包含
+`/compatible-mode/v1`（文本模式）或
+`/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding`
+（多模态模式）。
 
 获取 API Key: https://dashscope.console.aliyun.com/api-key
 
@@ -602,7 +608,7 @@ provider，并设置 `storage.vectordb.sparse_weight > 0`。自托管模型的�
 | `thinking` | bool | 启用思考模式（仅对部分火山模型生效，默认：`false`） |
 | `max_concurrent` | int | 语义处理阶段 LLM 最大并发调用数（默认：`32`） |
 | `max_retries` | int | VLM provider 瞬时错误的最大重试次数（默认：`3`；`0` 表示禁用重试） |
-| `credentials` | array | 有序 VLM 凭据/模型列表，索引 0 优先级最高。每项可单独覆盖 `provider`、`model`、`api_key`、`api_base`、`api_version`、`extra_headers`、`extra_request_body` 和 `stream` |
+| `credentials` | array | 有序 VLM 凭据/模型列表，索引 0 优先级最高。每项可单独覆盖 `provider`、`model`、`api_key`、`api_base`、`api_version`、`extra_headers`、`extra_request_body`、`stream` 和 `reasoning_effort` |
 | `failback_timeout_seconds` | float | 切换到低优先级 credential 后，尝试逐级切回的时间阈值（默认：`600`） |
 | `failback_request_count` | int | 低优先级 credential 成功处理多少次请求后尝试逐级切回（默认：`50`） |
 | `backup` | object | 可选的备用 VLM 配置（结构与 `vlm` 相同），当主 VLM 遇到限流、`5xx`、超时或连接失败等可重试错误时自动切换。仅支持 1 层备用 &mdash; 备用 VLM 本身不能再嵌套 `backup` |
@@ -610,6 +616,7 @@ provider，并设置 `storage.vectordb.sparse_weight > 0`。自托管模型的�
 | `extra_headers` | object | 兼容 HTTP provider 的自定义请求头。`kimi` 默认已注入所需订阅请求头，也支持在这里覆盖或扩展 |
 | `extra_request_body` | object | 传给 OpenAI 兼容 completion 请求的额外 JSON body 字段，可用于 Ollama `{"think": false}` 等 provider 专有参数 |
 | `stream` | bool | 启用流式模式（OpenAI 兼容 provider 可用，默认：`false`） |
+| `reasoning_effort` | str | OpenAI Codex Responses 请求的推理强度。不设置时使用模型默认值 |
 | `media` | object | 音视频运行参数；音视频理解复用该 VLM 的 provider、模型、凭据、client、超时、重试、请求头、输出 token 限制、故障切换和 token 统计 |
 | `media.enabled` | bool | 启用音视频理解（默认：`false`） |
 | `media.max_concurrent` | int | 音视频调用最大并发数（默认：`2`） |

@@ -1462,6 +1462,7 @@ pub async fn handle_find(
     level: Option<Vec<i32>>,
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+    read_content: bool,
     ctx: CliContext,
 ) -> Result<()> {
     let query = query.unwrap_or_default();
@@ -1493,6 +1494,9 @@ pub async fn handle_find(
     if let Some(ref t) = tags {
         params.push(format!("--tags {}", t.join(",")));
     }
+    if read_content {
+        params.push("--read-content".to_string());
+    }
     params.push(format!("\"{}\"", query));
     print_command_echo("ov find", &params.join(" "), ctx.config.echo_command);
     let client = ctx.get_client();
@@ -1509,6 +1513,7 @@ pub async fn handle_find(
         level,
         context_type,
         tags,
+        read_content,
         ctx.output_format,
         ctx.compact,
     )
@@ -1527,6 +1532,7 @@ pub async fn handle_search(
     level: Option<Vec<i32>>,
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+    read_content: bool,
     ctx: CliContext,
 ) -> Result<()> {
     let query = query.unwrap_or_default();
@@ -1561,6 +1567,9 @@ pub async fn handle_search(
     if let Some(ref t) = tags {
         params.push(format!("--tags {}", t.join(",")));
     }
+    if read_content {
+        params.push("--read-content".to_string());
+    }
     params.push(format!("\"{}\"", query));
     print_command_echo("ov search", &params.join(" "), ctx.config.echo_command);
     let client = ctx.get_client();
@@ -1578,6 +1587,7 @@ pub async fn handle_search(
         level,
         context_type,
         tags,
+        read_content,
         ctx.output_format,
         ctx.compact,
     )
