@@ -180,7 +180,7 @@ URL/文件  Parser  TreeBuilder  AGFS    Summarizer/Vector
 **补充说明**：
 - `to` 和 `parent` 不能同时使用；如果使用 `parent` 且希望父目录不存在时自动创建，请传 `create_parent=true`。指定 `to` 且目标已存在时，触发增量更新。
 - 如果同时省略 `to` 和 `parent`，服务端会先尝试使用当前用户的 `add_targets.resource_uri` 覆盖配置，再使用 `server.user_config_defaults.add_targets.resource_uri`。两者都没有配置时，保持旧的目标解析行为。
-- 资源目标可以使用公共 `viking://resources/...`、当前用户短写 `viking://user/resources/...`、显式用户 `viking://user/{user_id}/resources/...`，或 peer 级 `viking://user/{user_id}/peers/{peer_id}/resources/...`。当前用户短写会按请求身份 canonicalize。
+- 资源目标可以使用公共 `viking://resources/...`、家目录别名 `viking://~/resources/...`、显式用户 `viking://user/{user_id}/resources/...`，或 peer 级 `viking://user/{user_id}/peers/{peer_id}/resources/...`。家目录别名会按请求身份展开为 canonical 路径；无 uid 的写法 `viking://user/resources/...` 会被拒绝，并提示改用 `viking://~/resources/...`。
 - `user_id` 和 `peer_id` 路径片段必须是安全的单段标识，例如 `alice` 或 `web-visitor-alice`。包含路径分隔符、`.`、`..`、`:` 或 `+` 的值会被拒绝。
 - `path` 和 `temp_file_id` 不能同时指定，上传本地文件需要先通过 [temp_upload](#temp_upload) 上传获取 `temp_file_id`，在 SDK 和 CLI 中已经封装好。
 - `tags` 会在资源解析后、向量记录写入时同步写入底层向量库。`add_resource(tags=...)` 不返回 `tags_result`；需要验证时，可在 `/api/v1/search/find` 或 `/api/v1/search/search` 中传相同 `tags` 过滤召回。
@@ -286,7 +286,7 @@ curl -X POST http://localhost:1933/api/v1/resources \
   -H "X-API-Key: your-key" \
   -d "{
     \"temp_file_id\": \"$TEMP_FILE_ID\",
-    \"parent\": \"viking://user/resources/docs\",
+    \"parent\": \"viking://~/resources/docs\",
     \"create_parent\": true
   }"
 
@@ -379,7 +379,7 @@ result = client.add_resource(
 ## 添加到当前用户私有资源根
 result = client.add_resource(
     "./documents/guide.md",
-    parent="viking://user/resources/docs",
+    parent="viking://~/resources/docs",
     create_parent=True,
 )
 
@@ -486,7 +486,7 @@ ov add-resource https://example.feishu.cn/docx/doc_token \
 ov add-resource ./documents/guide.md --parent viking://resources/docs
 
 # 添加到当前用户私有资源根
-ov add-resource ./documents/guide.md --parent viking://user/resources/docs
+ov add-resource ./documents/guide.md --parent viking://~/resources/docs
 
 # 添加到指定 peer 的私有资源根
 ov add-resource ./documents/guide.md \

@@ -150,7 +150,7 @@ def _build_request_context(
         raise FailedPreconditionError(
             "User deletion is in progress",
             details={"task_id": deletion.get("task_id")},
-    )
+        )
     update_root_span_identity(
         request_state=request.state,
         account_id=account_id,
@@ -195,6 +195,7 @@ async def get_request_context(
         actor_peer_id=resolve_actor_peer_headers(x_openviking_actor_peer, x_openviking_agent),
         api_key=_extract_api_key(x_api_key_ctx, authorization_ctx),
     )
+
 
 async def get_session_request_context(
     request: Request,

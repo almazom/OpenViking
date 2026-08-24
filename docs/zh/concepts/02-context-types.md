@@ -56,17 +56,17 @@ results = client.find(
 
 | 类型 | 默认位置 | 说明 |
 |------|----------|------|
-| **profile** | `user/memories/profile.md` | 用户基本信息 |
-| **preferences** | `user/memories/preferences/` | 按主题组织的用户偏好 |
-| **entities** | `user/memories/entities/` | 人物、项目、组织等实体知识 |
-| **events** | `user/memories/events/` | 决策、里程碑等事件记录 |
-| **identity** | `user/memories/identity.md` | 助手的名称、形象、气质和自我介绍 |
-| **soul** | `user/memories/soul.md` | 助手的核心原则、边界、风格和连续性 |
-| **cases** | `user/memories/cases/` | 用于训练和评估的任务案例 |
-| **trajectories** | `user/memories/trajectories/` | 可复用的任务执行轨迹 |
-| **experiences** | `user/memories/experiences/` | 从执行结果中提炼的可复用经验 |
+| **profile** | `~/memories/profile.md` | 用户基本信息 |
+| **preferences** | `~/memories/preferences/` | 按主题组织的用户偏好 |
+| **entities** | `~/memories/entities/` | 人物、项目、组织等实体知识 |
+| **events** | `~/memories/events/` | 决策、里程碑等事件记录 |
+| **identity** | `~/memories/identity.md` | 助手的名称、形象、气质和自我介绍 |
+| **soul** | `~/memories/soul.md` | 助手的核心原则、边界、风格和连续性 |
+| **cases** | `~/memories/cases/` | 用于训练和评估的任务案例 |
+| **trajectories** | `~/memories/trajectories/` | 可复用的任务执行轨迹 |
+| **experiences** | `~/memories/experiences/` | 从执行结果中提炼的可复用经验 |
 
-表中的 `user/...` 是当前用户短路径，服务端会将其解析为 `viking://user/{user_id}/...`。当记忆策略允许 Peer 记忆时，支持 Peer 的类型会写入 `viking://user/{user_id}/peers/{peer_id}/memories/...`。记忆类型可通过自定义模板扩展或调整。
+表中的 `~/...` 使用家目录别名 `viking://~`，服务端会按认证身份将其展开为 `viking://user/{user_id}/...`。当记忆策略允许 Peer 记忆时，支持 Peer 的类型会写入 `viking://user/{user_id}/peers/{peer_id}/memories/...`。记忆类型可通过自定义模板扩展或调整。
 
 Schema 定义的 `memories/tools/` 和 `memories/skills/` 类型已禁用。它们与存放在 `viking://user/{user_id}/skills/{skill_name}/SKILL.md` 下的独立 Skill 不同，后者仍然保留并受支持。
 
@@ -82,7 +82,7 @@ task = await client.get_task(commit["task_id"])  # 轮询直到 task["status"] =
 # 搜索记忆
 results = await client.find(
     "用户界面偏好",
-    target_uri="viking://user/memories/"
+    target_uri="viking://~/memories/"
 )
 ```
 
@@ -99,7 +99,7 @@ results = await client.find(
 ### 存储位置
 
 ```
-viking://user/skills/{skill-name}/  # 默认存储路径
+viking://~/skills/{skill-name}/  # 默认存储路径
 ├── .abstract.md          # L0: 简短描述
 ├── .overview.md          # L1: 目录概览（生成后）
 ├── SKILL.md              # L2: 技能定义
@@ -126,7 +126,7 @@ AgentDefinedContextType 包含以下子类型，均存储于 `viking://agent/` �
 ### 使用
 
 ```python
-# 添加技能（默认写入 viking://user/skills/）
+# 添加技能（默认写入 viking://~/skills/）
 await client.add_skill({
     "name": "search-web",
     "description": "搜索网络获取信息",
@@ -139,7 +139,7 @@ ov skills add search-web -p viking://agent/skills
 # 搜索用户技能
 results = await client.find(
     "网络搜索",
-    target_uri="viking://user/skills/"
+    target_uri="viking://~/skills/"
 )
 
 # 搜索全局 agent 技能

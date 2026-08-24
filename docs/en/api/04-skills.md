@@ -14,9 +14,10 @@ OpenViking supports multiple skill definition formats:
 
 ### Skill Storage Structure
 
-Skills are stored under the current user's skills root. The short URI
-`viking://user/skills/` resolves to `viking://user/{user_id}/skills/` for the
-authenticated request:
+Skills are stored under the current user's skills root. The home alias
+`viking://~/skills/` expands to `viking://user/{user_id}/skills/` for the
+authenticated request (the uid-less spelling `viking://user/skills/` is no longer
+accepted):
 
 ```
 viking://user/{user_id}/skills/
@@ -189,7 +190,7 @@ Skills are a special type of resource that define actions or tools agents can pe
 - **Targeting**:
   - Skills are always user-scoped. `add_skill` does not accept `to`, `parent`, or `root_uri`.
   - Peer-scoped skill roots are not supported; actor peer filtering only applies to peer memories/resources, not peer skills.
-  - Use `viking://user/skills/...` as current-user shorthand when listing, reading, deleting, or searching skills.
+  - Use the home alias `viking://~/skills/...` to address your own skills when listing, reading, deleting, or searching. The uid-less `viking://user/skills/...` spelling returns an error with a corrective hint.
 
 - **Supported data formats**:
   1. **Dict (Skill format)**: Includes `name`, `description`, `content`, etc.

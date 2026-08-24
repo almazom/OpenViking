@@ -142,6 +142,34 @@ Content-Type: application/json
 覆盖已有配置前，内核会先备份到
 `/local/{account_id}/_system/setting.backup.json`。
 
+### user_settings
+
+ROOT 可管理任意 User，ADMIN 仅可管理所属 account 内的 User。User 配置接口当前
+仅允许修改 `memory_policy`。顶层统一的 `memory_types` 控制允许抽取的记忆类型。
+用户记忆根据每条 Message 的 `peer_id` 自动写入 Self 或 Peer；Agent 记忆始终只写入
+Self。
+
+```http
+GET /api/v1/admin/accounts/{account_id}/users/{user_id}/settings
+PATCH /api/v1/admin/accounts/{account_id}/users/{user_id}/settings
+Content-Type: application/json
+
+{
+  "memory_policy": {
+    "memory_types": ["profile", "preferences", "events", "entities", "experiences"]
+  }
+}
+```
+
+响应直接返回 User 级 `memory_policy`，并展开默认记忆类型和 Agent 记忆依赖；配置
+`experiences` 时会展开为 `cases`、`trajectories`、`experiences`；
+该结果不受 account 级 Agent 进化开关影响，Account 开关由独立接口管理。
+更新前会备份到该 User 的 `settings/user_config.backup.json`。未显式配置策略的
+Session 在 commit 时读取该 User 最新策略；User 未覆盖时，依次回退到
+`server.user_config_defaults.memory_policy` 和内核默认策略。若要清除已持久化的
+User override 并重新继承上述默认值，请 PATCH `{"memory_policy": null}`。
+`{"memory_policy": {}}` 表示显式策略，不会清除 override。
+
 ---
 
 ### create_account
@@ -172,14 +200,15 @@ Content-Type: application/json
 | account_id | str | 是 | - | 工作区 ID |
 | admin_user_id | str | 是 | - | 首个管理员用户 ID |
 | seed | str | 否 | `null` | 可选的确定性 API Key seed。传入后，key secret 为 `sha256(user_id + "\0" + seed)` |
-| user_config | object | 否 | `null` | 首个管理员用户的初始配置。当前支持 `add_targets.resource_uri` 和 `add_targets.skill_uri` |
+| user_config | object | 否 | `null` | 首个管理员用户的初始配置。支持 `add_targets.resource_uri`、`add_targets.skill_uri` 和 `memory_policy` |
 
 **说明：**
 - 在 `trusted` 模式下，响应中不会包含 `user_key` 字段
 - 省略 `seed` 时使用默认随机 API Key。seed 应视为密钥材料；过短的 seed 会让 key 更容易被猜测。
 - 不再支持 account 级 namespace 隔离配置。用户记忆使用 user-scoped namespace，一对多外部参与者通过 `peer_id` 表达。
-- `user_config.add_targets.resource_uri` 必须是可写资源目录 URI：`viking://resources` 或 `viking://resources/...`、`viking://user/resources` 或 `viking://user/resources/...`、`viking://user/{user_id}/resources` 或 `viking://user/{user_id}/resources/...`、`viking://user/{user_id}/peers/{peer_id}/resources` 或 `viking://user/{user_id}/peers/{peer_id}/resources/...`。
-- `user_config.add_targets.skill_uri` 只能是 `viking://user/skills` 或 `viking://agent/skills`。v1 不支持显式写成 `viking://user/{user_id}/skills`。
+- `user_config.add_targets.resource_uri` 必须是可写资源目录 URI：`viking://resources` 或 `viking://resources/...`、`viking://~/resources` 或 `viking://~/resources/...`、`viking://user/{user_id}/resources` 或 `viking://user/{user_id}/resources/...`、`viking://user/{user_id}/peers/{peer_id}/resources` 或 `viking://user/{user_id}/peers/{peer_id}/resources/...`。
+- `user_config.add_targets.skill_uri` 只能是 `viking://~/skills` 或 `viking://agent/skills`。v1 不支持显式写成 `viking://user/{user_id}/skills`。
+- 旧写法兼容：`viking://user/resources[/...]` 和 `viking://user/skills` 在这里仍会被接受，并归一化为 `viking://~/...` 形式（服务端会打印一条 info 日志）。在其他位置，无 uid 的写法会在请求入口被拒绝——新配置请直接写 `viking://~/...`。
 
 #### 3. 使用示例
 
@@ -254,8 +283,8 @@ result = client.admin_create_account(
     "alice",
     user_config={
         "add_targets": {
-            "resource_uri": "viking://user/resources",
-            "skill_uri": "viking://user/skills",
+            "resource_uri": "viking://~/resources",
+            "skill_uri": "viking://~/skills",
         }
     },
 )
@@ -281,8 +310,8 @@ result, err = client.AdminCreateAccountWithOptions(ctx, "acme-private", "alice",
     Seed: &seed,
     UserConfig: map[string]any{
         "add_targets": map[string]any{
-            "resource_uri": "viking://user/resources",
-            "skill_uri":    "viking://user/skills",
+            "resource_uri": "viking://~/resources",
+            "skill_uri":    "viking://~/skills",
         },
     },
 })
@@ -296,7 +325,7 @@ ov --sudo admin create-account acme --admin alice
 ov --sudo admin create-account acme --admin alice --seed alice-seed
 
 ov --sudo admin create-account acme-private --admin alice \
-  --user-config-json '{"add_targets":{"resource_uri":"viking://user/resources","skill_uri":"viking://user/skills"}}'
+  --user-config-json '{"add_targets":{"resource_uri":"viking://~/resources","skill_uri":"viking://~/skills"}}'
 ```
 
 **响应示例**
@@ -518,15 +547,16 @@ ov --sudo admin delete-account acme
 | user_id | str | 是 | - | 用户 ID |
 | role | str | 否 | "user" | 要分配的角色。`ROOT` 和同 account 的 `ADMIN` 可直接注册 `"user"` 或 `"admin"`。ROOT 身份只来自 `server.root_api_key`。 |
 | seed | str | 否 | `null` | 可选的确定性 API Key seed。传入后，key secret 为 `sha256(user_id + "\0" + seed)` |
-| user_config | object | 否 | `null` | 新用户的初始配置。当前支持 `add_targets.resource_uri` 和 `add_targets.skill_uri` |
+| user_config | object | 否 | `null` | 新用户的初始配置。支持 `add_targets.resource_uri`、`add_targets.skill_uri` 和 `memory_policy` |
 
 **说明：**
 - 在 `trusted` 模式下，响应中不会包含 `user_key` 字段
 - 省略 `seed` 时使用默认随机 API Key。seed 应视为密钥材料；过短的 seed 会让 key 更容易被猜测。
 - ADMIN 只能在自己所属的 account 中注册用户
 - 无法通过用户注册接口直接创建 `"root"` 角色
-- `user_config.add_targets.resource_uri` 必须是可写资源目录 URI：`viking://resources` 或 `viking://resources/...`、`viking://user/resources` 或 `viking://user/resources/...`、`viking://user/{user_id}/resources` 或 `viking://user/{user_id}/resources/...`、`viking://user/{user_id}/peers/{peer_id}/resources` 或 `viking://user/{user_id}/peers/{peer_id}/resources/...`。
-- `user_config.add_targets.skill_uri` 只能是 `viking://user/skills` 或 `viking://agent/skills`。v1 不支持显式写成 `viking://user/{user_id}/skills`。
+- `user_config.add_targets.resource_uri` 必须是可写资源目录 URI：`viking://resources` 或 `viking://resources/...`、`viking://~/resources` 或 `viking://~/resources/...`、`viking://user/{user_id}/resources` 或 `viking://user/{user_id}/resources/...`、`viking://user/{user_id}/peers/{peer_id}/resources` 或 `viking://user/{user_id}/peers/{peer_id}/resources/...`。
+- `user_config.add_targets.skill_uri` 只能是 `viking://~/skills` 或 `viking://agent/skills`。v1 不支持显式写成 `viking://user/{user_id}/skills`。
+- 旧写法兼容：`viking://user/resources[/...]` 和 `viking://user/skills` 在这里仍会被接受，并归一化为 `viking://~/...` 形式（服务端会打印一条 info 日志）。在其他位置，无 uid 的写法会在请求入口被拒绝——新配置请直接写 `viking://~/...`。
 
 #### 3. 使用示例
 
@@ -563,7 +593,7 @@ result = client.admin_register_user(
     "acme",
     "bob-private",
     role="user",
-    user_config={"add_targets": {"resource_uri": "viking://user/resources/project-a"}},
+    user_config={"add_targets": {"resource_uri": "viking://~/resources/project-a"}},
 )
 ```
 
@@ -586,7 +616,7 @@ seed := "bob-seed"
 result, err = client.AdminRegisterUserWithOptions(ctx, "acme", "bob-private", "user", &openviking.AdminRegisterUserOptions{
     Seed: &seed,
     UserConfig: map[string]any{
-        "add_targets": map[string]any{"resource_uri": "viking://user/resources/project-a"},
+        "add_targets": map[string]any{"resource_uri": "viking://~/resources/project-a"},
     },
 })
 ```
@@ -602,7 +632,7 @@ ov admin register-user acme bob --role user --seed bob-seed
 ov --sudo admin register-user acme bob --role user
 
 ov admin register-user acme bob-private --role user \
-  --user-config-json '{"add_targets":{"resource_uri":"viking://user/resources/project-a"}}'
+  --user-config-json '{"add_targets":{"resource_uri":"viking://~/resources/project-a"}}'
 ```
 
 **响应示例**

@@ -56,17 +56,17 @@ Memories are durable knowledge learned from interactions and task execution. The
 
 | Type | Default location | Description |
 |------|------------------|-------------|
-| **profile** | `user/memories/profile.md` | Basic user information |
-| **preferences** | `user/memories/preferences/` | User preferences organized by topic |
-| **entities** | `user/memories/entities/` | Knowledge about people, projects, organizations, and other entities |
-| **events** | `user/memories/events/` | Decisions, milestones, and other event records |
-| **identity** | `user/memories/identity.md` | Assistant name, persona, temperament, and self-introduction |
-| **soul** | `user/memories/soul.md` | Assistant principles, boundaries, style, and continuity |
-| **cases** | `user/memories/cases/` | Task cases used for training and evaluation |
-| **trajectories** | `user/memories/trajectories/` | Reusable task-execution trajectories |
-| **experiences** | `user/memories/experiences/` | Reusable experience distilled from execution outcomes |
+| **profile** | `~/memories/profile.md` | Basic user information |
+| **preferences** | `~/memories/preferences/` | User preferences organized by topic |
+| **entities** | `~/memories/entities/` | Knowledge about people, projects, organizations, and other entities |
+| **events** | `~/memories/events/` | Decisions, milestones, and other event records |
+| **identity** | `~/memories/identity.md` | Assistant name, persona, temperament, and self-introduction |
+| **soul** | `~/memories/soul.md` | Assistant principles, boundaries, style, and continuity |
+| **cases** | `~/memories/cases/` | Task cases used for training and evaluation |
+| **trajectories** | `~/memories/trajectories/` | Reusable task-execution trajectories |
+| **experiences** | `~/memories/experiences/` | Reusable experience distilled from execution outcomes |
 
-The `user/...` entries above are current-user short paths. The server resolves them to `viking://user/{user_id}/...`. When the memory policy permits Peer memory, supported types may instead be written under `viking://user/{user_id}/peers/{peer_id}/memories/...`. Applications can extend or adjust memory types with custom templates.
+The `~/...` entries above use the home alias `viking://~`, which the server expands to `viking://user/{user_id}/...` for the authenticated caller. When the memory policy permits Peer memory, supported types may instead be written under `viking://user/{user_id}/peers/{peer_id}/memories/...`. Applications can extend or adjust memory types with custom templates.
 
 The schema-defined `memories/tools/` and `memories/skills/` types are disabled. They are separate from standalone Skills stored under `viking://user/{user_id}/skills/{skill_name}/SKILL.md`, which remain supported.
 
@@ -82,7 +82,7 @@ task = await client.get_task(commit["task_id"])  # Poll until task["status"] == 
 # Search memories
 results = await client.find(
     "UI preferences",
-    target_uri="viking://user/memories/"
+    target_uri="viking://~/memories/"
 )
 ```
 
@@ -99,7 +99,7 @@ Skills are capabilities that Agents can invoke, belonging to the **AgentDefinedC
 ### Storage Location
 
 ```
-viking://user/skills/{skill-name}/     # Default storage path
+viking://~/skills/{skill-name}/     # Default storage path
 ├── .abstract.md          # L0: Short description
 ├── .overview.md          # L1: Directory overview (after generation)
 ├── SKILL.md              # L2: Skill definition
@@ -126,7 +126,7 @@ AgentDefinedContextType includes the following subtypes, all stored under the `v
 ### Usage
 
 ```python
-# Add skill (defaults to viking://user/skills/)
+# Add skill (defaults to viking://~/skills/)
 await client.add_skill({
     "name": "search-web",
     "description": "Search the web for information",
@@ -139,7 +139,7 @@ ov skills add search-web -p viking://agent/skills
 # Search user skills
 results = await client.find(
     "web search",
-    target_uri="viking://user/skills/"
+    target_uri="viking://~/skills/"
 )
 
 # Search global agent skills

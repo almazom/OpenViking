@@ -72,7 +72,7 @@ The `find()` method performs pure vector similarity search for simple query scen
 **Target resolution notes**:
 - With empty `target_uri`, non-ROOT retrieval searches the current user root (`viking://user/{user}`) and shared `viking://resources`.
 - To filter the current user's peer collection to one peer for filesystem and retrieval operations, send `X-OpenViking-Actor-Peer: <peer_id>` or construct the SDK/CLI client with `actor_peer_id`. See [Multi-Tenant: Peer Collection Filter](../concepts/11-multi-tenant.md#peer-restricted-view).
-- Current-user shorthand target URIs such as `viking://user/memories`, `viking://user/resources`, and `viking://user/skills` are canonicalized from the authenticated request identity.
+- Home-alias target URIs such as `viking://~/memories`, `viking://~/resources`, and `viking://~/skills` are expanded to the canonical path from the authenticated request identity. The uid-less spelling `viking://user/memories` (and the same shape for `resources`, `skills`, `peers`, `privacy`, `sessions`) is rejected with an error pointing at the `viking://~/...` form.
 
 **Image search notes**:
 - Image queries use the image vector as the query and search L2 resource leaf nodes in the target scope by default. Results are not limited to image files; multimodal embedding decides similarity between the query image and text/image resources.
@@ -231,13 +231,13 @@ results = client.find(
 # Search only in user memories
 results = client.find(
     "preferences",
-    target_uri="viking://user/memories"
+    target_uri="viking://~/memories"
 )
 
 # Search only in current-user resources
 results = client.find(
     "private docs",
-    target_uri="viking://user/resources"
+    target_uri="viking://~/resources"
 )
 
 # Search with the peer collection filtered to one peer
@@ -251,7 +251,7 @@ peer_results = peer_client.find("invoice follow-up")
 # Search only in skills
 results = client.find(
     "web search",
-    target_uri="viking://user/skills"
+    target_uri="viking://~/skills"
 )
 
 # Search in specific project

@@ -13,10 +13,10 @@ from openviking.core.path_variables import resolve_path_variables
 from openviking.core.uri_validation import validate_request_viking_uri
 from openviking.pyagfs.exceptions import AGFSClientError, AGFSNotFoundError
 from openviking.resource.processing_mode import DEFAULT_PROCESSING_MODE, ProcessingMode
-from openviking.server.auth import get_request_context
+from openviking.server.auth import get_request_context, require_role
 from openviking.server.dependencies import get_service
 from openviking.server.error_mapping import map_exception
-from openviking.server.identity import RequestContext
+from openviking.server.identity import RequestContext, Role
 from openviking.server.models import Response
 from openviking.server.telemetry import run_operation
 from openviking.telemetry import TelemetryRequest
@@ -40,28 +40,13 @@ class WriteContentRequest(BaseModel):
     processing_mode: ProcessingMode = DEFAULT_PROCESSING_MODE
 
 
-class BatchWritePrecondition(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal["create_if_absent", "replace_if_hash"]
-    base_hash: str | None = None
-
-    @model_validator(mode="after")
-    def validate_hash_shape(self) -> "BatchWritePrecondition":
-        if self.kind == "replace_if_hash" and not self.base_hash:
-            raise ValueError("base_hash is required for replace_if_hash")
-        if self.kind == "create_if_absent" and self.base_hash is not None:
-            raise ValueError("base_hash is not allowed for create_if_absent")
-        return self
-
-
 class BatchWriteOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     uri: str
     content: str | None = None
     content_base64: str | None = None
-    precondition: BatchWritePrecondition
+    mode: Literal["replace", "append", "create", "upsert"] = "replace"
 
     @model_validator(mode="after")
     def validate_content_shape(self) -> "BatchWriteOperation":
@@ -99,6 +84,7 @@ class ReindexRequest(BaseModel):
     mode: str = "vectors_only"
     wait: bool = True
     dry_run: bool = False
+    recursive: bool = True
     tags: list[str] | None = None
     tag_mode: str = "replace"
 
@@ -240,7 +226,7 @@ async def batch_write(
     request: BatchWriteRequest = Body(...),
     _ctx: RequestContext = Depends(get_request_context),
 ):
-    """Apply preconditioned file writes and refresh their indexes as one request."""
+    """Apply file writes and refresh their indexes once after the batch is written."""
     service = get_service()
     root_uri = validate_request_viking_uri(resolve_path_variables(request.root_uri), _ctx)
     operations = [operation.model_dump(exclude_none=True) for operation in request.operations]
@@ -295,7 +281,7 @@ async def set_tags(
 @router.post("/reindex")
 async def reindex(
     body: ReindexRequest = Body(...),
-    ctx: RequestContext = Depends(get_request_context),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN, Role.USER),
 ):
     """Reindex semantic/vector artifacts for a URI-scoped maintenance target."""
     if body.dry_run and body.mode != "prune_orphans":
@@ -309,6 +295,8 @@ async def reindex(
         "dry_run": body.dry_run,
         "ctx": ctx,
     }
+    if not body.recursive:
+        reindex_kwargs["recursive"] = False
     if body.tags is not None:
         reindex_kwargs["tags"] = body.tags
         reindex_kwargs["tag_mode"] = body.tag_mode

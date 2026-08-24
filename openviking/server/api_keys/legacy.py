@@ -264,7 +264,9 @@ class LegacyAPIKeyManager:
     async def _stat_signature(self, path: str) -> tuple:
         """Return a (path, size, mod_time) tuple for one file; missing/error yields a sentinel."""
         try:
-            info = await self._async_agfs.stat(path)
+            # Bypass plugin-local stat caches: on S3 the sliding-TTL stat cache
+            # would otherwise pin stale metadata and mask writer-side changes.
+            info = await self._async_agfs.stat(path, bypass_cache=True)
         except AGFSNotFoundError:
             return (path, None, None)
         except Exception:
@@ -453,41 +455,6 @@ class LegacyAPIKeyManager:
         await self._save_users_json(account_id)
         return key
 
-    async def remove_user(self, account_id: str, user_id: str) -> None:
-        """Remove a user from an account."""
-        async with self._group_lock:
-            account = self._accounts.get(account_id)
-            if account is None:
-                raise NotFoundError(account_id, "account")
-            if user_id not in account.users:
-                raise NotFoundError(user_id, "user")
-
-            groups = copy.deepcopy(account.groups)
-            changed = False
-            for group in groups.values():
-                members = group.get("members", [])
-                if user_id in members:
-                    group["members"] = [member for member in members if member != user_id]
-                    changed = True
-            if changed:
-                await self._replace_groups(account_id, account, groups)
-
-            user_info = account.users.pop(user_id)
-            key_or_hash = user_info.get("key", "")
-
-            if key_or_hash:
-                key_prefix = user_info.get("key_prefix", "") or self._get_key_prefix(key_or_hash)
-                if key_prefix in self._prefix_index:
-                    self._prefix_index[key_prefix] = [
-                        entry
-                        for entry in self._prefix_index[key_prefix]
-                        if not (entry.account_id == account_id and entry.user_id == user_id)
-                    ]
-                    if not self._prefix_index[key_prefix]:
-                        del self._prefix_index[key_prefix]
-
-            await self._save_users_json(account_id)
-
     async def begin_user_deletion(
         self,
         account_id: str,
@@ -572,7 +539,7 @@ class LegacyAPIKeyManager:
 
     async def finish_user_deletion(self, account_id: str, user_id: str, task_id: str) -> bool:
         """Remove the user only when this task still owns the deletion fence."""
-        async with self._reload_lock, self._user_deletion_lock:
+        async with self._reload_lock, self._user_deletion_lock, self._group_lock:
             account = self._accounts.get(account_id)
             if account is None:
                 return False
@@ -814,7 +781,7 @@ class LegacyAPIKeyManager:
 
     async def create_group(self, account_id: str, name: str) -> dict:
         name = self._normalize_group_name(name)
-        async with self._group_lock:
+        async with self._reload_lock, self._group_lock:
             account = self._require_account(account_id)
             if any(group.get("name") == name for group in account.groups.values()):
                 raise AlreadyExistsError(name, "group")
@@ -838,7 +805,7 @@ class LegacyAPIKeyManager:
         return sorted(set(group.get("members", [])))
 
     async def add_group_member(self, account_id: str, group_id: str, user_id: str) -> bool:
-        async with self._group_lock:
+        async with self._reload_lock, self._group_lock:
             account = self._require_account(account_id)
             if user_id not in account.users:
                 raise NotFoundError(user_id, "user")
@@ -852,7 +819,7 @@ class LegacyAPIKeyManager:
             return True
 
     async def remove_group_member(self, account_id: str, group_id: str, user_id: str) -> bool:
-        async with self._group_lock:
+        async with self._reload_lock, self._group_lock:
             account = self._require_account(account_id)
             group = self._require_group(account_id, group_id)
             if user_id not in group.get("members", []):
@@ -865,7 +832,7 @@ class LegacyAPIKeyManager:
             return True
 
     async def delete_group(self, account_id: str, group_id: str) -> None:
-        async with self._group_lock:
+        async with self._reload_lock, self._group_lock:
             account = self._require_account(account_id)
             group = self._require_group(account_id, group_id)
             if group.get("members"):

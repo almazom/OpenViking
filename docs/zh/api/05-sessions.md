@@ -1043,7 +1043,7 @@ ContextPart(
 ToolPart(
     tool_id="call_123",
     tool_name="search_web",
-    skill_uri="viking://user/skills/search-web/",
+    skill_uri="viking://~/skills/search-web/",
     tool_input={"query": "OAuth best practices"},
     tool_output="",
     tool_status="pending"  # "pending"、"running"、"completed"、"error"
@@ -1326,7 +1326,7 @@ curl -X POST http://localhost:1933/api/v1/sessions/a1b2c3d4/used \
 curl -X POST http://localhost:1933/api/v1/sessions/a1b2c3d4/used \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
-  -d '{"skill": {"uri": "viking://user/skills/search-web/", "input": {"query": "OAuth"}, "output": "Results...", "success": true}}'
+  -d '{"skill": {"uri": "viking://~/skills/search-web/", "input": {"query": "OAuth"}, "output": "Results...", "success": true}}'
 ```
 
 **响应示例**
@@ -1376,6 +1376,9 @@ curl -X POST http://localhost:1933/api/v1/sessions/a1b2c3d4/used \
 |------|------|------|--------|------|
 | session_id | str | 是 | - | 要提交的会话 ID |
 | keep_recent_count | int | 否 | 0 | 提交后保留为 live 状态的最近消息数 (保持 live, 不归档)。`0` (默认) 归档全部消息。 |
+
+有效策略按 Session `.meta.json`、最新 `settings/user_config.json`、内核默认值的
+顺序解析。Phase 2 开始前会将完整有效策略固化到异步任务。
 
 #### 3. 使用示例
 

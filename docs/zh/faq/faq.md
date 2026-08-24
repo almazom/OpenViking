@@ -346,7 +346,7 @@ OpenViking 使用分数传播机制：
 
 4. **查看提取的记忆**
    ```python
-   memories = await client.find("", target_uri="viking://user/memories/")
+   memories = await client.find("", target_uri="viking://~/memories/")
    ```
 
 ### 性能问题

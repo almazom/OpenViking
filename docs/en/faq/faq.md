@@ -353,7 +353,7 @@ This strategy finds semantically matching fragments while understanding the comp
 
 4. **View extracted memories**
    ```python
-   memories = await client.find("", target_uri="viking://user/memories/")
+   memories = await client.find("", target_uri="viking://~/memories/")
    ```
 
 ### Performance issues

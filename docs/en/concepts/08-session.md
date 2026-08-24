@@ -35,7 +35,7 @@ session.add_message(
     "assistant",
     [
         TextPart("Here's how..."),
-        ContextPart(uri="viking://user/memories/profile.md"),
+        ContextPart(uri="viking://~/memories/profile.md"),
     ]
 )
 
@@ -52,11 +52,11 @@ session.add_message(
 
 ```python
 # Record used contexts
-session.used(contexts=["viking://user/memories/profile.md"])
+session.used(contexts=["viking://~/memories/profile.md"])
 
 # Record used skill
 session.used(skill={
-    "uri": "viking://user/skills/code-search",
+    "uri": "viking://~/skills/code-search",
     "input": "search config",
     "output": "found 3 files",
     "success": True
@@ -242,7 +242,7 @@ viking://user/{user_id}/sessions/{session_id}/
 └── tools/
     └── {tool_id}/tool.json
 
-viking://user/memories/
+viking://~/memories/
 ├── profile.md
 ├── identity.md
 ├── soul.md
@@ -254,11 +254,12 @@ viking://user/memories/
 └── experiences/
 ```
 
-`viking://user/sessions/{session_id}` is accepted as a short form relative to
-the current request user and is canonicalized to
-`viking://user/{user_id}/sessions/{session_id}`. The old
-`viking://session/{session_id}` form is accepted as a backward-compatible alias
-for the same current-user session path and is not a separate storage root.
+`viking://~/sessions/{session_id}` uses the home alias and is expanded to
+`viking://user/{user_id}/sessions/{session_id}` for the authenticated caller.
+The uid-less spelling `viking://user/sessions/{session_id}` is no longer accepted
+and returns an error pointing at the `viking://~/...` form. The old
+`viking://session/{session_id}` form is still accepted as a backward-compatible
+alias for the same session path and is not a separate storage root.
 
 ## Related Documents
 

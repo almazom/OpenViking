@@ -851,10 +851,20 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
                 description: "Generate or update one shared Skill package.",
             },
         ],
-        next_steps: &[HelpItem {
-            label: "ov tree <target-uri>",
-            description: "Inspect the generated output.",
-        }],
+        next_steps: &[
+            HelpItem {
+                label: "ov task status <cmp-task-id>",
+                description: "Inspect the Compile task.",
+            },
+            HelpItem {
+                label: "ov task cancel <cmp-task-id>",
+                description: "Cancel the Compile task.",
+            },
+            HelpItem {
+                label: "ov tree <target-uri>",
+                description: "Inspect the generated output.",
+            },
+        ],
     },
     CommandHelpSpec {
         path: &["wait"],
@@ -888,7 +898,7 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
             },
             HelpItem {
                 label: "ov task cancel <task-id>",
-                description: "Cancel one task.",
+                description: "Cancel one task, including a cmp_ Compile task.",
             },
         ],
         next_steps: &[HelpItem {
@@ -1341,6 +1351,10 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
             HelpItem {
                 label: "ov reindex viking://projects/acme --mode semantic_and_vectors --wait true",
                 description: "Regenerate semantic artifacts, then vectors.",
+            },
+            HelpItem {
+                label: "ov reindex viking://projects/acme --mode semantic_and_vectors --recursive=false",
+                description: "Refresh only the target directory semantics and vectors, without sub-directory.",
             },
             HelpItem {
                 label: "ov reindex viking://projects/acme --mode prune_orphans --dry-run",
@@ -2905,6 +2919,7 @@ mod tests {
 
         assert!(rendered.contains("--mode <vectors_only|semantic_and_vectors|prune_orphans>"));
         assert!(rendered.contains("--dry-run"));
+        assert!(rendered.contains("--recursive <true|false>"));
         assert!(rendered.contains("Regenerate semantic artifacts, then vectors."));
     }
 

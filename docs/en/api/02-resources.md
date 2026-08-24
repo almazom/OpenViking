@@ -185,7 +185,7 @@ This endpoint is the core entry point for resource management, supporting adding
 **Additional Notes**:
 - `to` and `parent` cannot be specified together. Use `create_parent=true` with `parent` when the parent directory should be created automatically.
 - If both `to` and `parent` are omitted, the server may use the current user's `add_targets.resource_uri` override, then `server.user_config_defaults.add_targets.resource_uri`. If neither is set, legacy target resolution is unchanged.
-- Resource targets may use public `viking://resources/...`, current-user shorthand `viking://user/resources/...`, explicit user `viking://user/{user_id}/resources/...`, or peer `viking://user/{user_id}/peers/{peer_id}/resources/...` paths. Current-user shorthand is canonicalized with the authenticated request identity.
+- Resource targets may use public `viking://resources/...`, the home alias `viking://~/resources/...`, explicit user `viking://user/{user_id}/resources/...`, or peer `viking://user/{user_id}/peers/{peer_id}/resources/...` paths. The home alias is expanded to the canonical path using the authenticated request identity; the uid-less spelling `viking://user/resources/...` is rejected with an error pointing at `viking://~/resources/...`.
 - `user_id` and `peer_id` path segments must be safe single-segment identifiers, for example `alice` or `web-visitor-alice`. Values with path separators, `.`, `..`, `:`, or `+` are rejected.
 - `path` and `temp_file_id` cannot be specified together
 - Raw HTTP calls for local files require first uploading via [temp_upload](#temp_upload) to obtain `temp_file_id`
@@ -293,7 +293,7 @@ curl -X POST http://localhost:1933/api/v1/resources \
   -H "X-API-Key: your-key" \
   -d "{
     \"temp_file_id\": \"$TEMP_FILE_ID\",
-    \"parent\": \"viking://user/resources/docs\",
+    \"parent\": \"viking://~/resources/docs\",
     \"create_parent\": true
   }"
 
@@ -374,7 +374,7 @@ result = client.add_resource(
 # Add to the current user's private resource root
 result = client.add_resource(
     "./documents/guide.md",
-    parent="viking://user/resources/docs",
+    parent="viking://~/resources/docs",
     create_parent=True,
 )
 
@@ -481,7 +481,7 @@ ov add-resource https://example.feishu.cn/docx/doc_token \
 ov add-resource ./documents/guide.md --parent viking://resources/docs
 
 # Add under the current user's private resource root
-ov add-resource ./documents/guide.md --parent viking://user/resources/docs
+ov add-resource ./documents/guide.md --parent viking://~/resources/docs
 
 # Add under a specific peer's private resource root
 ov add-resource ./documents/guide.md \

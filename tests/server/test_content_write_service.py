@@ -4,6 +4,7 @@
 """Service-level tests for content write coordination."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,6 +14,7 @@ from openviking.session.memory.utils import MemoryFileUtils
 from openviking.session.memory.utils.content_visibility import visible_content
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
+from openviking.storage.queuefs.semantic_ops.freshness_policy import FreshnessAction
 from openviking_cli.exceptions import (
     AlreadyExistsError,
     DeadlineExceededError,
@@ -464,6 +466,28 @@ async def test_resource_write_semantic_refresh_uses_coalesce_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resource_write_wait_forces_directory_refresh(monkeypatch):
+    file_uri = "viking://resources/demo/doc.md"
+    root_uri = "viking://resources/demo"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
+    coordinator = ContentWriteCoordinator(
+        viking_fs=_FakeVikingFS(file_uri=file_uri, root_uri=root_uri)
+    )
+    enqueue = AsyncMock(return_value=FreshnessAction.REFRESH_NOW)
+    monkeypatch.setattr(coordinator, "_enqueue_semantic_refresh", enqueue)
+    monkeypatch.setattr(coordinator, "_wait_for_request", AsyncMock(return_value=None))
+
+    await coordinator.write(
+        uri=file_uri,
+        content="updated",
+        ctx=ctx,
+        wait=True,
+    )
+
+    assert enqueue.await_args.kwargs["force_refresh"] is True
+
+
+@pytest.mark.asyncio
 async def test_write_timeout_after_enqueue_releases_resource_lock(monkeypatch):
     file_uri = "viking://resources/demo/doc.md"
     root_uri = "viking://resources/demo"
@@ -702,7 +726,7 @@ async def test_memory_write_wait_skips_semantic_queue_and_releases_write_lock(mo
 
     async def _fake_refresh_schema_overview(**kwargs):
         del kwargs
-        return None
+        return True
 
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
     monkeypatch.setattr(coordinator, "_wait_for_request", _fail_wait_for_request)

@@ -568,6 +568,7 @@ class OpenVikingService:
         mode: str = "vectors_only",
         wait: bool = True,
         dry_run: bool = False,
+        recursive: bool = True,
         tags: list[str] | None = None,
         tag_mode: str = "replace",
         ctx: RequestContext | None = None,
@@ -586,6 +587,8 @@ class OpenVikingService:
             "dry_run": dry_run,
             "ctx": effective_ctx,
         }
+        if not recursive:
+            execute_kwargs["recursive"] = False
         if tags is not None:
             execute_kwargs["tags"] = tags
             execute_kwargs["tag_mode"] = tag_mode

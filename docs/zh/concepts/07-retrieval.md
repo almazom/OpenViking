@@ -92,9 +92,9 @@ Step 5: 转换为 MatchedContext
 
 | context_type | 根目录 |
 |--------------|--------|
-| MEMORY | `viking://user/memories` |
+| MEMORY | `viking://~/memories` |
 | RESOURCE | `viking://resources` |
-| SKILL | `viking://user/skills` |
+| SKILL | `viking://~/skills` |
 
 ### 递归搜索算法
 

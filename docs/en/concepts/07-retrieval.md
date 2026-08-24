@@ -92,9 +92,9 @@ Step 5: Convert to MatchedContext
 
 | context_type | Root Directories |
 |--------------|------------------|
-| MEMORY | `viking://user/memories` |
+| MEMORY | `viking://~/memories` |
 | RESOURCE | `viking://resources` |
-| SKILL | `viking://user/skills` |
+| SKILL | `viking://~/skills` |
 
 ### Recursive Search Algorithm
 

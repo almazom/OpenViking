@@ -294,26 +294,19 @@ async def init_context_collection(storage) -> bool:
         vectordb_cfg.backend == "volcengine"
         and getattr(getattr(vectordb_cfg, "volcengine", None), "api_key", None)
     )
+    if uses_volcengine_data_plane:
+        logger.info(
+            "Skip collection bootstrap for volcengine data-plane backend; "
+            "collection/index/schema must be pre-created out of band"
+        )
+        return False
+
     required_acl_fields = ACL_CONTEXT_FIELDS
     schema = CollectionSchemas.context_collection(
         collection_name,
         vector_dim,
         description=_encode_collection_description("Unified context collection", embedding_meta),
     )
-    if uses_volcengine_data_plane:
-        existing_meta = await storage.get_collection_meta()
-        if not existing_meta:
-            raise EmbeddingConfigurationError(
-                "Context collection must be pre-created for volcengine data-plane mode"
-            )
-        existing_fields = {field.get("FieldName") for field in existing_meta.get("Fields", [])}
-        missing = sorted(required_acl_fields - existing_fields)
-        if missing:
-            raise EmbeddingConfigurationError(
-                f"Context collection is missing ACL fields: {missing}"
-            )
-        return False
-
     created = await storage.create_collection(collection_name, schema)
     if created:
         return True
@@ -329,13 +322,16 @@ async def init_context_collection(storage) -> bool:
 
     existing_fields = {field.get("FieldName") for field in existing_meta.get("Fields", [])}
     missing_acl_fields = sorted(required_acl_fields - existing_fields)
+    existing_scalar_indexes = set(existing_meta.get("ScalarIndex", []))
+    missing_acl_indexes = sorted(required_acl_fields - existing_scalar_indexes)
 
     async def _migrate_acl_schema() -> None:
-        if not missing_acl_fields:
+        if not missing_acl_fields and not missing_acl_indexes:
             return
         if vectordb_cfg.backend not in {"local", "cuvs"}:
             raise EmbeddingConfigurationError(
-                f"Context collection is missing ACL fields: {missing_acl_fields}. "
+                "Context collection is missing ACL schema: "
+                f"fields={missing_acl_fields}, scalar_indexes={missing_acl_indexes}. "
                 "Add them to the remote collection before starting OpenViking."
             )
         if not hasattr(storage, "update_collection_schema"):

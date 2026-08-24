@@ -35,7 +35,7 @@ session.add_message(
     "assistant",
     [
         TextPart("Here's how..."),
-        ContextPart(uri="viking://user/memories/profile.md"),
+        ContextPart(uri="viking://~/memories/profile.md"),
     ]
 )
 
@@ -52,11 +52,11 @@ session.add_message(
 
 ```python
 # 记录使用的上下文
-session.used(contexts=["viking://user/memories/profile.md"])
+session.used(contexts=["viking://~/memories/profile.md"])
 
 # 记录使用的技能
 session.used(skill={
-    "uri": "viking://user/skills/code-search",
+    "uri": "viking://~/skills/code-search",
     "input": "search config",
     "output": "found 3 files",
     "success": True
@@ -242,7 +242,7 @@ viking://user/{user_id}/sessions/{session_id}/
 └── tools/
     └── {tool_id}/tool.json
 
-viking://user/memories/
+viking://~/memories/
 ├── profile.md
 ├── identity.md
 ├── soul.md
@@ -254,10 +254,11 @@ viking://user/memories/
 └── experiences/
 ```
 
-`viking://user/sessions/{session_id}` 是相对当前请求用户的短路径，服务端会将其
-规范化为 `viking://user/{user_id}/sessions/{session_id}`。
-`viking://session/{session_id}` 会作为同一个当前用户 session 路径的向后兼容别名
-被接受，不是独立的存储根。
+`viking://~/sessions/{session_id}` 使用家目录别名，服务端会按认证身份将其展开为
+`viking://user/{user_id}/sessions/{session_id}`。无 uid 的写法
+`viking://user/sessions/{session_id}` 不再被接受，请求会报错并提示改用 `viking://~/...`。
+`viking://session/{session_id}` 仍会作为同一个 session 路径的向后兼容别名被接受，
+不是独立的存储根。
 
 ## 相关文档
 
