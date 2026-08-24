@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Mapping, Optional
 
-from openviking.core.namespace import canonical_user_content_root, uri_parts, visible_roots
+from openviking.core.namespace import canonical_user_root, uri_parts, visible_roots
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import ACL_CONTEXT_FIELDS, AclManager, acl_principals
 from openviking.storage.expr import And, Eq, FilterExpr, In, Or, PathScope, RawDSL
@@ -1691,7 +1691,7 @@ class VikingVectorIndexBackend:
         access_filters: List[FilterExpr] = [
             legacy_filter,
             shared_acl_filter,
-            PathScope("uri", canonical_user_content_root(ctx, "resource"), depth=-1),
+            PathScope("uri", f"{canonical_user_root(ctx)}/resources", depth=-1),
         ]
         if ctx.role == Role.ADMIN:
             access_filters.append(PathScope("uri", "viking://resources", depth=-1))

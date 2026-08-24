@@ -17,7 +17,6 @@ _CONTENT_TYPES_BY_SCOPE = {
 }
 _PEER_CONTENT_SEGMENTS = frozenset({"memories", "resources"})
 _USER_RELATIVE_ROOT_SEGMENTS = frozenset({"peers", "privacy", "sessions"})
-_CONTENT_SEGMENT_BY_KIND = {"resource": "resources", "skill": "skills"}
 
 
 class NamespaceShapeError(ValueError):
@@ -156,14 +155,6 @@ def context_type_for_uri(uri: str) -> str:
 
 def canonical_user_root(ctx: RequestContext) -> str:
     return f"viking://user/{user_space_fragment(ctx)}"
-
-
-def canonical_user_content_root(ctx: RequestContext, kind: str) -> str:
-    """Return the canonical current-user content root for a supported content kind."""
-    segment = _CONTENT_SEGMENT_BY_KIND.get(kind)
-    if segment is None:
-        raise ValueError(f"Unsupported content kind: {kind}")
-    return f"{canonical_user_root(ctx)}/{segment}"
 
 
 def user_space_fragment(ctx: RequestContext) -> str:

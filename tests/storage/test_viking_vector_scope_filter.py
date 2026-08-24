@@ -27,6 +27,7 @@ def _build(
     level: list[int] | None = None,
 ):
     backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
     return backend._build_scope_filter(
         ctx=ctx,
         context_type=context_type,
@@ -37,7 +38,9 @@ def _build(
 
 
 def _tenant_filter(ctx: RequestContext):
-    return VikingVectorIndexBackend._tenant_filter(ctx, context_type="resource")
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    return backend._tenant_filter(ctx, context_type="resource")
 
 
 def test_descendant_target_elides_only_visible_root_path_filter():
@@ -157,6 +160,7 @@ async def test_cross_user_targets_cannot_bypass_visible_roots_in_tenant_search()
         return [record for record in records if matches(filter, record)]
 
     backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
     backend.search = fake_search
 
     cross_user_only = await backend.search_in_tenant(
