@@ -348,6 +348,16 @@ async def test_get_users(manager: APIKeyManager):
     assert roles["alice"] == "admin"
     assert roles["bob"] == "user"
 
+    await manager.begin_user_deletion(
+        acct,
+        "bob",
+        task_id="delete-bob",
+        owner_account_id=acct,
+        owner_user_id="alice",
+    )
+    users = manager.get_users(acct)
+    assert {u["user_id"] for u in users} == {"alice"}
+
 
 async def test_group_lifecycle_persistence_and_user_cleanup(manager_service):
     manager = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
