@@ -104,17 +104,63 @@ async def test_memory_replace_preserves_metadata(service):
 
 
 @pytest.mark.asyncio
-async def test_resource_append_is_plain_concatenation(service):
-    """Appending to a non-memory file must not inject a MEMORY_FIELDS trailer
-    or strip the existing trailing newline (memory namespaces only)."""
-    ctx = RequestContext(user=service.user, role=Role.USER)
+async def test_shared_resource_acl_protects_content_and_recursive_delete(service):
+    """Shared resource content stays plain while ACLs protect its operations."""
+    admin = RequestContext(user=service.user, role=Role.ADMIN)
+    reader = RequestContext(
+        user=UserIdentifier(admin.account_id, "reader"),
+        role=Role.USER,
+        group_ids=("grp_readers",),
+    )
+    outsider = RequestContext(
+        user=UserIdentifier(admin.account_id, "outsider"),
+        role=Role.USER,
+    )
+    parent_uri = "viking://resources/append_plain"
     uri = "viking://resources/append_plain/journal.md"
+    delete_root = "viking://resources/recursive_delete"
+    protected_dir = f"{delete_root}/protected"
+    protected_file = f"{protected_dir}/notes.md"
 
-    await service.fs.write(uri, content="line1\n", ctx=ctx, mode="create")
-    await service.fs.write(uri, content="line2\n", ctx=ctx, mode="append")
+    await service.fs.write(uri, content="line1\n", ctx=admin, mode="create", wait=True)
+    await service.fs.write(uri, content="line2\n", ctx=admin, mode="append", wait=True)
+    await service.fs.set_acl(
+        parent_uri,
+        [{"principal": "group:grp_readers", "level": "viewer"}],
+        ctx=admin,
+    )
 
-    stored = await service.viking_fs.read_file(uri, ctx=ctx)
+    stored = await service.viking_fs.read_file(uri, ctx=reader)
     assert stored == "line1\nline2\n"
+    with pytest.raises(PermissionDeniedError):
+        await service.fs.write(uri, content="denied", ctx=reader)
+
+    await service.viking_fs.mkdir(protected_dir, ctx=admin)
+    await service.viking_fs.write_file(protected_file, "protected", ctx=admin)
+    for record_id, record_uri, level in (
+        ("recursive-delete-root", delete_root, 0),
+        ("recursive-delete-protected", protected_dir, 0),
+        ("recursive-delete-file", protected_file, 2),
+    ):
+        assert await service.vikingdb_manager.upsert(
+            {
+                "id": record_id,
+                "uri": record_uri,
+                "account_id": admin.account_id,
+                "context_type": "resource",
+                "level": level,
+                "vector": [0.1] * service.vikingdb_manager.vector_dim,
+            },
+            ctx=admin,
+        )
+    await service.fs.set_acl(
+        protected_dir,
+        [{"principal": "user:bob", "level": "manager"}],
+        ctx=admin,
+    )
+    with pytest.raises(PermissionDeniedError):
+        await service.fs.rm(delete_root, recursive=True, ctx=outsider)
+    assert await service.viking_fs.read_file(protected_file, ctx=admin) == "protected"
 
 
 @pytest.mark.asyncio

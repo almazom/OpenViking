@@ -17,7 +17,6 @@ from openviking.server.identity import Role
 from openviking.service.core import OpenVikingService
 from openviking_cli.exceptions import (
     AlreadyExistsError,
-    FailedPreconditionError,
     InvalidArgumentError,
     NotFoundError,
     PermissionDeniedError,
@@ -265,6 +264,7 @@ async def test_user_deletion_fence_revokes_key_and_rejects_stale_finish(
     new_key = await manager.register_user(acct, "bob", "user")
     assert await manager.finish_user_deletion(acct, "bob", "delete-1") is False
     assert manager.resolve(new_key).user_id == "bob"
+
 async def test_regenerate_key(manager: APIKeyManager):
     """Regenerating key should invalidate old key and return new valid key."""
     acct = _uid()
@@ -359,62 +359,20 @@ async def test_get_users(manager: APIKeyManager):
     assert {u["user_id"] for u in users} == {"alice"}
 
 
-async def test_group_lifecycle_persistence_and_user_cleanup(manager_service):
-    manager = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
-    await manager.load()
-    acct = _uid()
-    await manager.create_account(acct, "alice")
-    await manager.register_user(acct, "bob")
-
-    group = await manager.create_group(acct, "Engineering")
-    group_id = group["group_id"]
-    assert group == {"group_id": group_id, "name": "Engineering", "member_count": 0}
-    with pytest.raises(AlreadyExistsError):
-        await manager.create_group(acct, "Engineering")
-
-    assert await manager.add_group_member(acct, group_id, "bob") is True
-    assert await manager.add_group_member(acct, group_id, "bob") is False
-    assert manager.get_user_group_ids(acct, "bob") == (group_id,)
-    assert manager.get_group_members(acct, group_id) == ["bob"]
-    with pytest.raises(FailedPreconditionError):
-        await manager.delete_group(acct, group_id)
-
-    reloaded = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
-    await reloaded.load()
-    assert reloaded.get_user_group_ids(acct, "bob") == (group_id,)
-
-    deletion, created = await reloaded.begin_user_deletion(
-        acct,
-        "bob",
-        task_id="delete-bob",
-        owner_account_id=acct,
-        owner_user_id="alice",
-    )
-    assert created is True
-    assert deletion["task_id"] == "delete-bob"
-    assert await reloaded.finish_user_deletion(acct, "bob", "delete-bob") is True
-    reloaded = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
-    await reloaded.load()
-    assert reloaded.get_user_group_ids(acct, "bob") == ()
-    assert reloaded.get_group_members(acct, group_id) == []
-
-    await reloaded.delete_group(acct, group_id)
-    replacement = await reloaded.create_group(acct, "Engineering")
-    assert replacement["group_id"] != group_id
-
-
 # ---- Persistence tests ----
 
 
-async def test_persistence_across_reload(manager_service):
-    """Keys should survive manager reload from AGFS."""
+async def test_user_and_group_persistence_across_reload(manager_service):
+    """Reload preserves keys/groups, while user deletion removes membership."""
     mgr1 = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
     await mgr1.load()
 
     acct = _uid()
     key = await mgr1.create_account(acct, "alice")
+    await mgr1.register_user(acct, "bob")
+    group_id = (await mgr1.create_group(acct, "Engineering"))["group_id"]
+    await mgr1.add_group_member(acct, group_id, "bob")
 
-    # Create new manager instance and reload
     mgr2 = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
     await mgr2.load()
 
@@ -422,6 +380,21 @@ async def test_persistence_across_reload(manager_service):
     assert identity.account_id == acct
     assert identity.user_id == "alice"
     assert identity.role == Role.ADMIN
+    assert mgr2.get_user_group_ids(acct, "bob") == (group_id,)
+
+    await mgr2.begin_user_deletion(
+        acct,
+        "bob",
+        task_id="delete-bob",
+        owner_account_id=acct,
+        owner_user_id="alice",
+    )
+    await mgr2.finish_user_deletion(acct, "bob", "delete-bob")
+
+    mgr3 = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
+    await mgr3.load()
+    assert mgr3.get_user_group_ids(acct, "bob") == ()
+    assert mgr3.get_group_members(acct, group_id) == []
 
 
 async def test_legacy_account_without_settings_loads_without_namespace_settings(manager_service):

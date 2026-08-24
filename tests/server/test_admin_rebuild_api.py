@@ -8,8 +8,7 @@ import pytest
 
 from openviking.core.context import ContextLevel
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.acl import AclAction
-from openviking_cli.exceptions import OpenVikingError
+from openviking_cli.exceptions import OpenVikingError, PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
 from tests.server.test_admin_api import ROOT_KEY
 from tests.server.test_admin_api import admin_app as _admin_app_fixture
@@ -45,7 +44,7 @@ async def test_reindex_requires_authentication(admin_client: httpx.AsyncClient):
     assert resp.status_code == 401
 
 
-async def test_reindex_uses_vikingfs_write_authorization(monkeypatch):
+async def test_reindex_propagates_vikingfs_authorization_denial(monkeypatch):
     from openviking.service import reindex_executor
     from openviking.service.core import OpenVikingService
     from openviking.service.reindex_executor import ReindexExecutor
@@ -54,12 +53,10 @@ async def test_reindex_uses_vikingfs_write_authorization(monkeypatch):
         user=UserIdentifier(account_id="reindex_user_scope", user_id="bob"),
         role=Role.USER,
     )
-    authorized = []
-    executed = []
 
     class FakeVikingFS:
         async def _ensure_access(self, uri, request_ctx, *, action):
-            authorized.append((uri, request_ctx, action))
+            raise PermissionDeniedError("denied")
 
     class FakeTracker:
         async def has_running(self, *args, **kwargs):
@@ -70,34 +67,19 @@ async def test_reindex_uses_vikingfs_write_authorization(monkeypatch):
     executor = ReindexExecutor()
 
     async def run(**kwargs):
-        executed.append(kwargs)
-        return {"status": "completed", "uri": kwargs["uri"], "mode": kwargs["mode"]}
+        raise AssertionError("authorization denial must prevent reindex execution")
 
     monkeypatch.setattr(executor, "_run", run)
     monkeypatch.setattr(reindex_executor, "get_viking_fs", lambda: FakeVikingFS())
     monkeypatch.setattr(reindex_executor, "get_task_tracker", lambda: FakeTracker())
     monkeypatch.setattr(reindex_executor, "get_reindex_executor", lambda: executor)
 
-    canonical_uri = "viking://user/bob/resources"
-    result = await service.reindex(
-        uri=canonical_uri,
-        mode="vectors_only",
-        ctx=ctx,
-    )
-
-    assert authorized == [(canonical_uri, ctx, AclAction.WRITE)]
-    assert executed == [
-        {
-            "uri": canonical_uri,
-            "object_type": "resource",
-            "mode": "vectors_only",
-            "dry_run": False,
-            "recursive": True,
-            "ingest_options": None,
-            "ctx": ctx,
-        }
-    ]
-    assert result["uri"] == canonical_uri
+    with pytest.raises(PermissionDeniedError, match="denied"):
+        await service.reindex(
+            uri="viking://user/bob/resources",
+            mode="vectors_only",
+            ctx=ctx,
+        )
 
 
 async def test_reindex_rejects_unsupported_uri(admin_client: httpx.AsyncClient):

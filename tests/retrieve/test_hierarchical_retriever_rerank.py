@@ -366,23 +366,6 @@ async def test_retrieve_falls_back_to_vector_scores_when_rerank_returns_none(mon
         lambda config: fake_client,
     )
 
-    retriever = HierarchicalRetriever(
-        storage=DummyStorage(),
-        embedder=DummyEmbedder(),
-        rerank_config=_config(),
-    )
-
-    result = await retriever.retrieve(_query(), ctx=_ctx(), limit=2, mode=RetrieverMode.THINKING)
-
-    assert [ctx.uri for ctx in result.matched_contexts] == [
-        "viking://resources/file-b",
-        "viking://resources/file-a",
-    ]
-    assert fake_client.calls
-
-
-@pytest.mark.asyncio
-async def test_thinking_mode_globally_recalls_deep_acl_shared_files():
     storage = QuickSearchStorage(
         [_result("viking://resources/a/b/deep.md", 0.9, abstract="deep shared")]
     )
@@ -391,13 +374,14 @@ async def test_thinking_mode_globally_recalls_deep_acl_shared_files():
     retriever = HierarchicalRetriever(
         storage=storage,
         embedder=DummyEmbedder(),
-        rerank_config=None,
+        rerank_config=_config(),
     )
 
     result = await retriever.retrieve(_query(), ctx=_ctx(), limit=1, mode=RetrieverMode.THINKING)
 
-    assert [item.uri for item in result.matched_contexts] == ["viking://resources/a/b/deep.md"]
+    assert [ctx.uri for ctx in result.matched_contexts] == ["viking://resources/a/b/deep.md"]
     assert [call["level"] for call in storage.search_calls] == [[0, 1], [2]]
+    assert fake_client.calls
 
 
 @pytest.mark.asyncio

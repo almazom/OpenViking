@@ -9,7 +9,6 @@ import pytest
 
 from openviking.pyagfs.exceptions import AGFSInvalidOperationError
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.acl import AclAction
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
@@ -86,11 +85,13 @@ class TestVikingFSURITraversalGuard:
         fs.agfs.read.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_write_rejects_traversal_before_agfs_write(self) -> None:
+    async def test_write_rejects_unauthorized_paths_before_agfs_write(self) -> None:
         fs = _make_viking_fs()
 
         with pytest.raises(PermissionDeniedError, match="Unsafe URI"):
             await fs.write("viking://resources/../../_system/accounts.json", "pwned")
+        with pytest.raises(PermissionDeniedError, match="requires an administrator"):
+            await fs.write("viking://", "pwned", ctx=_user_ctx())
 
         fs.agfs.write.assert_not_called()
 
@@ -212,13 +213,6 @@ class TestVikingFSURITraversalGuard:
         fs._delete_from_vector_store.assert_not_called()
         fs.agfs.stat.assert_not_called()
         fs.agfs.rm.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_user_cannot_mutate_account_root(self) -> None:
-        fs = _make_viking_fs()
-
-        with pytest.raises(PermissionDeniedError, match="requires an administrator"):
-            await fs._ensure_access("viking://", _user_ctx(), action=AclAction.WRITE)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
