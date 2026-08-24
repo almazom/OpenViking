@@ -78,24 +78,24 @@ async def test_reindex_uses_vikingfs_write_authorization(monkeypatch):
     monkeypatch.setattr(reindex_executor, "get_task_tracker", lambda: FakeTracker())
     monkeypatch.setattr(reindex_executor, "get_reindex_executor", lambda: executor)
 
+    canonical_uri = "viking://user/bob/resources"
     result = await service.reindex(
-        uri="viking://user/resources",
+        uri=canonical_uri,
         mode="vectors_only",
         ctx=ctx,
     )
 
-    canonical_uri = "viking://user/bob/resources"
     assert authorized == [(canonical_uri, ctx, AclAction.WRITE)]
     assert executed == [
-            {
-                "uri": canonical_uri,
-                "object_type": "resource",
-                "mode": "vectors_only",
-                "dry_run": False,
-                "ingest_options": None,
-                "ctx": ctx,
-            }
-        ]
+        {
+            "uri": canonical_uri,
+            "object_type": "resource",
+            "mode": "vectors_only",
+            "dry_run": False,
+            "ingest_options": None,
+            "ctx": ctx,
+        }
+    ]
     assert result["uri"] == canonical_uri
 
 
@@ -191,7 +191,7 @@ async def test_reindex_resource_vectors_only_wait_true(monkeypatch):
 
     ctx = RequestContext(
         user=UserIdentifier(account_id="test", user_id="alice"),
-        role=Role.ROOT,
+        role=Role.USER,
     )
     request = ReindexRequest(
         uri="viking://resources/demo",
@@ -221,8 +221,11 @@ async def test_reindex_resource_vectors_only_wait_true(monkeypatch):
 async def test_reindex_resource_vectors_only_wait_false(monkeypatch):
     from openviking.server.routers.content import ReindexRequest, reindex
 
+    seen = {}
+
     class FakeService:
         async def reindex(self, *, uri, mode, wait, ctx, dry_run=False):
+            seen["uri"] = uri
             return {
                 "task_id": "rbld_123",
                 "status": "accepted",
@@ -233,9 +236,9 @@ async def test_reindex_resource_vectors_only_wait_false(monkeypatch):
 
     ctx = RequestContext(
         user=UserIdentifier(account_id="test", user_id="alice"),
-        role=Role.ROOT,
+        role=Role.USER,
     )
-    request = ReindexRequest(uri="viking://resources/demo", mode="vectors_only", wait=False)
+    request = ReindexRequest(uri="viking://user/resources", mode="vectors_only", wait=False)
 
     monkeypatch.setattr("openviking.server.routers.content.get_service", lambda: FakeService())
     response = await reindex(body=request, ctx=ctx)
@@ -244,6 +247,7 @@ async def test_reindex_resource_vectors_only_wait_false(monkeypatch):
     assert response.result["status"] == "accepted"
     assert response.result["task_id"] == "rbld_123"
     assert response.result["object_type"] == "resource"
+    assert seen["uri"] == "viking://user/alice/resources"
     assert "reason" not in response.result
 
 
