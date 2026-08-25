@@ -193,9 +193,10 @@ class FSService:
     ) -> None:
         """Create directory."""
         viking_fs = self._ensure_initialized()
+        directory_uri, abstract_uri = self._resolve_directory_uris(uri)
+        directory_preexisting = await viking_fs.exists(directory_uri, ctx=ctx)
         await viking_fs.mkdir(uri, ctx=ctx)
 
-        directory_uri, abstract_uri = self._resolve_directory_uris(uri)
         abstract = self._normalize_directory_description(description)
         if not abstract:
             if await viking_fs.exists(abstract_uri, ctx=ctx):
@@ -229,6 +230,7 @@ class FSService:
             overview="",
             context_type=context_type_for_uri(directory_uri),
             ctx=ctx,
+            acl_creator_direct=True if not directory_preexisting else None,
             include_overview=False,
         )
 

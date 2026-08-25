@@ -362,6 +362,7 @@ async def vectorize_directory_meta(
     include_overview: bool = True,
     scalar_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
     ingest_options: IngestOptions | None = None,
+    acl_creator_direct: bool | None = None,
     include_abstract: bool = True,
 ) -> None:
     """
@@ -411,10 +412,7 @@ async def vectorize_directory_meta(
             context_abstract.set_vectorize(
                 Vectorize(text=embedding_text_for_body(ContextLevel.ABSTRACT, uri, abstract))
             )
-            msg_abstract = EmbeddingMsgConverter.from_context(
-                context_abstract,
-                acl_creator_ctx=ctx,
-            )
+            msg_abstract = EmbeddingMsgConverter.from_context(context_abstract, acl_creator_direct)
             _apply_scalar_overrides(
                 msg_abstract,
                 (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value)),
@@ -460,8 +458,7 @@ async def vectorize_directory_meta(
                 Vectorize(text=embedding_text_for_body(ContextLevel.OVERVIEW, uri, overview))
             )
             msg_overview = EmbeddingMsgConverter.from_context(
-                context_overview,
-                acl_creator_ctx=ctx,
+                context_overview, acl_creator_direct
             )
             _apply_scalar_overrides(
                 msg_overview,
@@ -507,6 +504,7 @@ async def vectorize_file(
     preserve_existing_created_at: bool = False,
     scalar_override: Optional[Dict[str, Any]] = None,
     ingest_options: IngestOptions | None = None,
+    acl_creator_direct: bool | None = None,
 ) -> bool:
     """
     Vectorize a single file.
@@ -622,10 +620,7 @@ async def vectorize_file(
             logger.debug(f"Skipping file {file_path} (no text content or summary)")
             return False
 
-        embedding_msg = EmbeddingMsgConverter.from_context(
-            context,
-            acl_creator_ctx=ctx,
-        )
+        embedding_msg = EmbeddingMsgConverter.from_context(context, acl_creator_direct)
         if not embedding_msg:
             return False
 

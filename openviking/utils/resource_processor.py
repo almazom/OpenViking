@@ -588,11 +588,13 @@ class ResourceProcessor:
                         ctx=ctx,
                         skip_vectorization=not build_index,
                         ingest_options=ingest_options,
+                        created=not target_preexisting,
                     )
                 elif build_index:
                     if root_is_file:
                         await self._vectorize_resource_file(
-                            root_uri, ctx=ctx, ingest_options=ingest_options
+                            root_uri, ctx=ctx, ingest_options=ingest_options,
+                            acl_creator_direct=(True if not target_preexisting else None),
                         )
                     elif vectors_only:
                         await self._vectorize_resource_files(
@@ -606,13 +608,15 @@ class ResourceProcessor:
                 ctx=ctx,
                 skip_vectorization=not build_index,
                 ingest_options=ingest_options,
+                created=not target_preexisting,
             )
         elif vectors_only or root_is_file:
             if not build_index:
                 return result
             if root_is_file:
                 await self._vectorize_resource_file(
-                    root_uri, ctx=ctx, ingest_options=ingest_options
+                    root_uri, ctx=ctx, ingest_options=ingest_options,
+                    acl_creator_direct=(True if not target_preexisting else None),
                 )
             else:
                 await self._vectorize_resource_files(
@@ -744,6 +748,7 @@ class ResourceProcessor:
         *,
         ctx: RequestContext,
         ingest_options: IngestOptions | None = None,
+        acl_creator_direct: bool | None = None,
     ) -> None:
         parent = VikingURI(file_uri).parent
         if parent is None:
@@ -756,6 +761,7 @@ class ResourceProcessor:
             context_type=context_type_for_uri(file_uri),
             ctx=ctx,
             ingest_options=IngestOptions.from_value(ingest_options),
+            acl_creator_direct=acl_creator_direct,
         )
 
     async def reserve_unique_candidate(

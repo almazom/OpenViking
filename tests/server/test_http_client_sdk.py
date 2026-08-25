@@ -66,7 +66,8 @@ async def test_sdk_add_resource(http_client):
         role=Role.ADMIN,
     )
     acl = await service.fs.get_acl(result["root_uri"], ctx=creator)
-    assert acl["direct_entries"] == [{"principal": "user:sdk_test_user", "level": "manager"}]
+    assert acl["acl_enabled"] is False
+    assert acl["direct_entries"] == []
 
 
 async def test_sdk_add_resource_raises_processing_error_for_business_error(
@@ -171,7 +172,9 @@ async def test_sdk_mkdir_and_ls(http_client):
         role=Role.ADMIN,
     )
     acl = await service.fs.get_acl(uri.rstrip("/"), ctx=creator)
-    assert acl["direct_entries"] == [{"principal": "user:sdk_test_user", "level": "manager"}]
+    assert acl["acl_enabled"] is False
+    assert acl["direct_entries"] == []
+    assert acl["inherited_entries"] == []
     result = await client.ls("viking://resources/")
     assert isinstance(result, list)
 

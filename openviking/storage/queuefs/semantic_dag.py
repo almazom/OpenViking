@@ -162,6 +162,7 @@ class SemanticDagExecutor:
         ctx: RequestContext,
         incremental_update: bool = False,
         target_uri: Optional[str] = None,
+        target_preexisting: Optional[bool] = None,
         recursive: bool = True,
         lock: Optional[Dict[str, Any]] = None,
         is_code_repo: bool = False,
@@ -179,6 +180,7 @@ class SemanticDagExecutor:
         self._ctx = ctx
         self._incremental_update = incremental_update
         self._target_uri = target_uri
+        self._target_preexisting = target_preexisting
         self._recursive = recursive
         self._lock = lock
         self._is_code_repo = is_code_repo
@@ -215,6 +217,20 @@ class SemanticDagExecutor:
         self._overview_cache: Dict[str, Dict[str, str]] = {}
         self._overview_cache_lock = asyncio.Lock()
         self._root_write_result = AbstractOverviewWriteResult(wrote=False)
+
+    def _acl_creator_direct(self, uri: str) -> bool | None:
+        normalized = uri.rstrip("/")
+        if self._generation_trigger == "resource_ingest" and self._target_preexisting is False:
+            root = self._root_uri.rstrip("/")
+            if normalized == root:
+                return True
+            if normalized.startswith(f"{root}/"):
+                return False
+        return (
+            True
+            if normalized in (path.rstrip("/") for path in self._changes.get("added", []))
+            else None
+        )
 
     async def run(self, root_uri: str) -> None:
         """Run DAG execution starting from root_uri."""
@@ -699,6 +715,7 @@ class SemanticDagExecutor:
                     ctx=self._ctx,
                     use_summary=use_summary,
                     ingest_options=self._ingest_options,
+                    acl_creator_direct=self._acl_creator_direct(file_path),
                 )
             except Exception as e:
                 logger.error(
@@ -954,6 +971,7 @@ class SemanticDagExecutor:
                         overview=overview,
                         ctx=self._ctx,
                         ingest_options=self._ingest_options,
+                        acl_creator_direct=self._acl_creator_direct(dir_uri),
                     )
                 except Exception as e:
                     logger.error(

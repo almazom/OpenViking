@@ -471,6 +471,7 @@ class SemanticProcessor(DequeueHandlerBase):
                                 ctx=current_ctx,
                                 incremental_update=is_incremental,
                                 target_uri=target_uri,
+                                target_preexisting=msg.target_preexisting,
                                 recursive=msg.recursive,
                                 lock=semantic_lock.lock,
                                 is_code_repo=msg.is_code_repo,
@@ -1528,6 +1529,7 @@ class SemanticProcessor(DequeueHandlerBase):
         overview: str,
         ctx: Optional[RequestContext] = None,
         ingest_options: IngestOptions | None = None,
+        acl_creator_direct: bool | None = None,
     ) -> None:
         """Create directory Context and enqueue to EmbeddingQueue."""
 
@@ -1541,6 +1543,7 @@ class SemanticProcessor(DequeueHandlerBase):
             context_type=context_type,
             ctx=active_ctx,
             ingest_options=ingest_options,
+            acl_creator_direct=acl_creator_direct,
         )
 
     async def _vectorize_single_file(
@@ -1553,6 +1556,7 @@ class SemanticProcessor(DequeueHandlerBase):
         use_summary: bool = False,
         preserve_existing_created_at: bool = False,
         ingest_options: IngestOptions | None = None,
+        acl_creator_direct: bool | None = None,
     ) -> None:
         """Vectorize a single file using its content or summary."""
         from openviking.utils.embedding_utils import vectorize_file
@@ -1567,4 +1571,5 @@ class SemanticProcessor(DequeueHandlerBase):
             use_summary=use_summary,
             preserve_existing_created_at=preserve_existing_created_at,
             ingest_options=ingest_options,
+            acl_creator_direct=acl_creator_direct,
         )

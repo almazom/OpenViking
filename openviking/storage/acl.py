@@ -38,6 +38,7 @@ ACL_PRINCIPAL_FIELDS = tuple(
     f"{prefix}_{action.value}_principal_ids" for prefix in _ACL_PREFIXES for action in AclAction
 )
 ACL_CONTEXT_FIELDS = frozenset(("acl_enabled", *ACL_PRINCIPAL_FIELDS))
+ACL_CREATOR_DIRECT_FIELD = "_acl_creator_direct"
 _ACL_OUTPUT_FIELDS = ["uri", *sorted(ACL_CONTEXT_FIELDS)]
 
 
@@ -335,11 +336,7 @@ class AclManager:
         return (await self.resolve_many([uri], ctx))[uri]
 
     async def materialize_context_records(
-        self,
-        records: Sequence[dict[str, Any]],
-        ctx: RequestContext,
-        *,
-        acl_creator_user_id: str | None = None,
+        self, records: Sequence[dict[str, Any]], ctx: RequestContext
     ) -> list[dict[str, Any]]:
         canonical_by_uri: dict[str, str] = {}
         for record in records:
@@ -365,10 +362,13 @@ class AclManager:
         for uri in new_uris:
             ancestors = acl_ancestors(uri)
             parents[uri] = ancestors[-2] if len(ancestors) > 1 else None
+
         parent_acl = await self.resolve_many([parent for parent in parents.values() if parent], ctx)
 
         materialized: list[dict[str, Any]] = []
         for record in records:
+            record = dict(record)
+            creator_direct = record.pop(ACL_CREATOR_DIRECT_FIELD, None)
             source_uri = str(record.get("uri") or "")
             canonical = canonical_by_uri.get(source_uri)
             if not canonical:
@@ -379,15 +379,14 @@ class AclManager:
                 parent = parents[canonical]
                 inherited = parent_acl[parent].permissions if parent else DirectAcl()
                 direct = DirectAcl()
-                if acl_creator_user_id is not None and uri_parts(canonical) != ["resources"]:
-                    direct = entries_to_direct(
-                        [AclEntry(f"user:{acl_creator_user_id}", AclLevel.MANAGER)]
-                    )
-                effective = EffectiveAcl(
-                    not direct.empty or not inherited.empty,
-                    direct,
-                    inherited,
-                )
+                creator = (record.get("user") or {}).get("user_id")
+                if creator and creator_direct is not None and parent and parent_acl[parent].enabled:
+                    creator_acl = entries_to_direct([AclEntry(f"user:{creator}", AclLevel.MANAGER)])
+                    if creator_direct:
+                        direct = creator_acl
+                    else:
+                        inherited = inherited.union(creator_acl)
+                effective = EffectiveAcl(not direct.empty or not inherited.empty, direct, inherited)
             materialized.append({**record, **effective.context_fields()})
         return materialized
 

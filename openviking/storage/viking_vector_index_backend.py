@@ -912,7 +912,6 @@ class VikingVectorIndexBackend:
         data: Dict[str, Any],
         *,
         ctx: RequestContext,
-        acl_creator_user_id: str | None = None,
         _acl_materialized: bool = False,
         options: UpsertOptions | Mapping[str, Any] | None = None,
     ) -> str:
@@ -932,13 +931,7 @@ class VikingVectorIndexBackend:
         )
         if not _acl_materialized:
             data = {key: value for key, value in data.items() if key not in ACL_CONTEXT_FIELDS}
-            data = (
-                await self._materialize_acl_fields(
-                    [data],
-                    ctx,
-                    acl_creator_user_id=acl_creator_user_id,
-                )
-            )[0]
+            data = (await self._materialize_acl_fields([data], ctx))[0]
         backend = self._get_backend_for_context(ctx)
         logger.debug(
             "[VikingVectorIndexBackend.upsert] Using backend for account_id=%s",
@@ -994,19 +987,11 @@ class VikingVectorIndexBackend:
         return result
 
     async def _materialize_acl_fields(
-        self,
-        records: List[Dict[str, Any]],
-        ctx: RequestContext,
-        *,
-        acl_creator_user_id: str | None = None,
+        self, records: List[Dict[str, Any]], ctx: RequestContext
     ) -> List[Dict[str, Any]]:
         if not self.acl_manager or not records:
             return records
-        return await self.acl_manager.materialize_context_records(
-            records,
-            ctx,
-            acl_creator_user_id=acl_creator_user_id,
-        )
+        return await self.acl_manager.materialize_context_records(records, ctx)
 
     async def update(self, data: Dict[str, Any], *, ctx: RequestContext) -> UpdateResult:
         """Strict update path. The target record must already exist."""

@@ -16,7 +16,7 @@ ACL API 管理 `viking://resources/...` 共享资源的直接授权，并返回�
 
 所有接口都要求调用者对目标节点拥有 `manage`。共享资源由 account `ADMIN` 隐式管理。
 
-`viking://resources` 是固定共享 scope，不能设置直接 ACL。新建文件或目录会自动给创建者直接 `manager` 权限，并同时继承父目录 ACL。
+`viking://resources` 是固定共享 scope，不能设置直接 ACL。父目录没有 ACL 时，新建内容继续使用原有公开规则；首次开启 ACL 必须由 account `ADMIN` 显式设置。父目录已有 ACL 时，新建文件或目录会继承父权限，并给创建者直接 `manager`。`add-resource` 只在本次生成的根节点写创建者直接权限，内部节点只继承。
 
 ## 数据结构
 

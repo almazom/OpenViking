@@ -812,6 +812,7 @@ class ContentWriteCoordinator:
                     uri=uri,
                     context_type=context_type,
                     ctx=ctx,
+                    acl_creator_direct=True if mode == "create" else None,
                 )
                 post_process_started = True
             else:
@@ -919,6 +920,7 @@ class ContentWriteCoordinator:
         uri: str,
         context_type: str,
         ctx: RequestContext,
+        acl_creator_direct: bool | None = None,
     ) -> bool:
         parent = VikingURI(uri).parent
         if parent is None:
@@ -930,6 +932,7 @@ class ContentWriteCoordinator:
             parent_uri=parent.uri,
             context_type=context_type,
             ctx=ctx,
+            acl_creator_direct=acl_creator_direct,
         )
 
     async def _vectorize_abstract_overview(self, *, uri: str, ctx: RequestContext) -> bool:

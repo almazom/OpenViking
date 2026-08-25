@@ -104,7 +104,9 @@ async def test_memory_replace_preserves_metadata(service):
 
 
 @pytest.mark.asyncio
-async def test_shared_resource_acl_protects_content_and_recursive_delete(service):
+async def test_shared_resource_acl_protects_content_and_recursive_delete(
+    service, sample_markdown_file
+):
     """Shared resource content stays plain while ACLs protect its operations."""
     creator = RequestContext(
         user=service.user,
@@ -163,6 +165,22 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(service
         created_acl = await service.fs.get_acl(created_uri, ctx=creator)
         assert created_acl["direct_entries"] == [creator_entry]
         assert created_acl["inherited_entries"] == inherited_entries
+
+    imported = await service.resources.add_resource(
+        path=str(sample_markdown_file),
+        parent=parent_uri,
+        ctx=creator,
+        reason="ACL import",
+        wait=True,
+    )
+    import_root = imported["root_uri"]
+    imported_acl = await service.fs.get_acl(import_root, ctx=creator)
+    assert imported_acl["direct_entries"] == [creator_entry]
+    assert imported_acl["inherited_entries"] == inherited_entries
+    children = await service.fs.ls(import_root, ctx=creator, simple=True)
+    child_acl = await service.fs.get_acl(children[0], ctx=creator)
+    assert child_acl["direct_entries"] == []
+    assert child_acl["inherited_entries"] == [*inherited_entries, creator_entry]
 
     await service.fs.write(uri, content="line2\n", ctx=creator, mode="append", wait=True)
 
