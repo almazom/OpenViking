@@ -12,17 +12,20 @@ class EmbeddingMsg:
     context_data: Dict[str, Any]
     id: str = field(default_factory=lambda: str(uuid4()))
     telemetry_id: str = ""
+    acl_creator_user_id: str = ""
 
     def __init__(
         self,
         message: Union[str, List[Dict[str, Any]]],
         context_data: Dict[str, Any],
         telemetry_id: str = "",
+        acl_creator_user_id: str = "",
     ):
         self.id = str(uuid4())
         self.message = message
         self.context_data = context_data
         self.telemetry_id = telemetry_id
+        self.acl_creator_user_id = acl_creator_user_id
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert embedding message to dictionary format."""
@@ -39,6 +42,7 @@ class EmbeddingMsg:
             message=data["message"],
             context_data=data["context_data"],
             telemetry_id=data.get("telemetry_id", ""),
+            acl_creator_user_id=data.get("acl_creator_user_id", ""),
         )
         obj.id = data.get("id", obj.id)
         return obj

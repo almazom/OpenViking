@@ -13,6 +13,7 @@ viking://resources/...
 ```
 
 - An account `ADMIN` is an implicit manager of `viking://resources/...`.
+- `viking://resources` is a fixed shared scope and cannot carry a direct ACL. ACLs start on files and directories below it.
 - `viking://user/{user_id}/resources/...` is private and does not accept ACLs. To share it, move the resource into a writable shared directory and inherit that directory's ACL.
 
 Implicit management is not stored as an ACL entry and cannot be removed by ACL changes. It ensures that shared resources always have an identity that can establish or recover permissions.
@@ -62,7 +63,9 @@ Removing the group's direct ACL from `A/B` does not remove entries from `A` or `
 
 ## Default Behavior and `acl_enabled`
 
-If neither a node nor any ancestor has a direct ACL, OpenViking keeps the existing URI namespace visibility and write behavior.
+For legacy nodes without a creator grant, if neither the node nor any ancestor has a direct ACL, OpenViking keeps the existing URI namespace visibility and write behavior.
+
+When a newly created file or directory in the shared scope gets its first context record, its creator automatically receives a direct `manager` grant on that node. Permissions from the parent are merged as inherited ACL. Re-embedding or replacing an existing context record does not change the creator grant.
 
 When the node or any ancestor has a direct ACL, the node enters the ACL-controlled domain:
 
@@ -86,7 +89,7 @@ All filesystem APIs use the same permission mapping:
 
 The server canonicalizes the URI, then uses one authorization entry point for account/owner/actor-peer boundaries, the effective ACL or legacy fallback, and write/delete namespace guards. Ordinary writes, deletes, and reindexing do not maintain separate permission rules.
 
-Establishing the first ACL on a shared node is the only bootstrap rule: before the node enters the ACL-controlled domain, only the shared scope's implicit manager can set it. Later ACL changes require effective `manage` capability.
+A new shared node is bootstrapped by its creator's direct `manager` grant. For legacy nodes without a creator grant, only the shared scope's implicit manager can establish the first ACL. Later ACL changes require effective `manage` capability.
 
 An ACL grant on a directory is inherited by every descendant. `list`, `tree`, and other batch results still check every returned node because an ACL-free directory may be visible under legacy URI rules while one of its descendants has entered the ACL-controlled domain through its own ACL.
 
@@ -116,7 +119,7 @@ The request principals are `user:{ctx.user_id}`, `user:*`, and one `group:{group
 
 A retrieval target URI is only a search scope; the caller does not need to read the target node itself. A user can discover a deeply shared file even when intermediate directories are not readable.
 
-Shared-scope context writes preserve an existing direct ACL for the same URI and derive inherited ACL fields for new nodes from their parent. Re-embedding and ordinary replacement writes cannot reset controlled records to default visibility or modify ACLs through regular context fields.
+Shared-scope context writes preserve an existing direct ACL for the same URI. A new node receives a direct `manager` grant for its creator and derives inherited ACL fields from its parent. Re-embedding and ordinary replacement writes cannot reset controlled records to default visibility or modify ACLs through regular context fields.
 
 ## Example
 

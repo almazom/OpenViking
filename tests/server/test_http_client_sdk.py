@@ -9,8 +9,10 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from openviking.server.identity import RequestContext, Role
 from openviking_cli.client.http import AsyncHTTPClient
 from openviking_cli.exceptions import ConflictError, ProcessingError
+from openviking_cli.session.user_id import UserIdentifier
 from tests.server.conftest import SAMPLE_MD_CONTENT, TEST_TMP_DIR
 from tests.server.ovpack_test_helpers import build_ovpack_bytes
 
@@ -49,7 +51,7 @@ async def test_sdk_health(http_client):
 
 
 async def test_sdk_add_resource(http_client):
-    client, _ = http_client
+    client, service = http_client
     f = TEST_TMP_DIR / "sdk_sample.md"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(SAMPLE_MD_CONTENT)
@@ -59,6 +61,12 @@ async def test_sdk_add_resource(http_client):
     assert "telemetry" not in result
     assert "root_uri" in result
     assert result["root_uri"].startswith("viking://")
+    creator = RequestContext(
+        user=UserIdentifier("sdk_test_account", "sdk_test_user"),
+        role=Role.ADMIN,
+    )
+    acl = await service.fs.get_acl(result["root_uri"], ctx=creator)
+    assert acl["direct_entries"] == [{"principal": "user:sdk_test_user", "level": "manager"}]
 
 
 async def test_sdk_add_resource_raises_processing_error_for_business_error(
@@ -151,12 +159,19 @@ async def test_sdk_ls(http_client):
 
 
 async def test_sdk_mkdir_and_ls(http_client):
-    client, _ = http_client
+    client, service = http_client
     uri = "viking://resources/sdk_dir/"
 
     await client.mkdir(uri)
+    await client.wait_processed()
 
     assert await client.abstract(uri) == "# sdk_dir"
+    creator = RequestContext(
+        user=UserIdentifier("sdk_test_account", "sdk_test_user"),
+        role=Role.ADMIN,
+    )
+    acl = await service.fs.get_acl(uri.rstrip("/"), ctx=creator)
+    assert acl["direct_entries"] == [{"principal": "user:sdk_test_user", "level": "manager"}]
     result = await client.ls("viking://resources/")
     assert isinstance(result, list)
 

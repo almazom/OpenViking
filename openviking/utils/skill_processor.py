@@ -238,6 +238,7 @@ class SkillProcessor:
             await self._index_skill(
                 context=context,
                 skill_dir_uri=skill_dir_uri,
+                ctx=ctx,
             )
             telemetry.set(
                 "skill.index.duration_ms", round((time.perf_counter() - index_start) * 1000, 3)
@@ -580,14 +581,22 @@ class SkillProcessor:
             else:
                 await viking_fs.write_file_bytes(aux_uri, file_bytes, ctx=ctx)
 
-    async def _index_skill(self, context: Context, skill_dir_uri: str):
+    async def _index_skill(
+        self,
+        context: Context,
+        skill_dir_uri: str,
+        ctx: RequestContext,
+    ):
         """Write skill directory vector via async queue as L0."""
         context.uri = skill_dir_uri
         context.is_leaf = False
         context.level = 0
 
         context.set_vectorize(Vectorize(text=context.abstract))
-        embedding_msg = EmbeddingMsgConverter.from_context(context)
+        embedding_msg = EmbeddingMsgConverter.from_context(
+            context,
+            acl_creator_ctx=ctx,
+        )
         if embedding_msg:
             if embedding_msg.telemetry_id:
                 get_request_wait_tracker().register_embedding_root(

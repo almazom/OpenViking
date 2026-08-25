@@ -13,6 +13,7 @@ viking://resources/...
 ```
 
 - `viking://resources/...` 的 account `ADMIN` 是隐式管理者。
+- `viking://resources` 是固定共享 scope，本身不能设置直接 ACL；ACL 从它下面的文件和目录开始。
 - `viking://user/{user_id}/resources/...` 是个人私有区，不接受 ACL。需要分享时，将资源移动到有权写入的共享目录，并继承该目录的 ACL。
 
 隐式管理权不会写入 ACL 条目，也不能被 ACL 删除。它保证共享资源始终有人能够首次设置或恢复权限。
@@ -62,7 +63,9 @@ viewer user:carol on viking://resources/A/B/C/report.md
 
 ## 默认行为与 `acl_enabled`
 
-如果节点及其祖先都没有直接 ACL，OpenViking 继续使用原有 URI namespace 可见性和写入规则。
+对于没有创建者授权的存量节点，如果节点及其祖先都没有直接 ACL，OpenViking 继续使用原有 URI namespace 可见性和写入规则。
+
+共享区中新建文件或目录生成首条 context 记录时，创建者会自动获得该节点的直接 `manager` 权限；父目录权限同时作为继承 ACL 合并。重新向量化或覆盖已有 context 不会改变创建者授权。
 
 只要节点或任一祖先存在直接 ACL，该节点就进入 ACL 控制域：
 
@@ -86,7 +89,7 @@ acl_enabled = true
 
 服务端会先 canonicalize URI，再在同一个鉴权入口中依次执行 account/owner/actor peer 等硬边界、有效 ACL 或 legacy fallback，以及写入和删除的 namespace 防护。普通写入、删除和 reindex 不维护各自的权限特判。
 
-首次为共享节点设置 ACL 是唯一的 bootstrap 规则：节点尚未进入 ACL 控制域时，只能由共享区隐式管理者设置；启用后，后续 ACL 修改要求有效 `manage` 能力。
+新建共享节点由创建者的直接 `manager` 完成权限 bootstrap。对于没有创建者授权的存量节点，首次设置 ACL 仍只能由共享区隐式管理者完成；启用后，后续 ACL 修改要求有效 `manage` 能力。
 
 目录上的 ACL 授权会被所有后代继承。`list`、`tree` 和批量结果仍逐个检查有效 ACL，因为未设置 ACL 的目录可能按原有 URI 规则可见，而某个后代已经通过自己的 ACL 进入控制域。
 
@@ -116,7 +119,7 @@ acl_inherited_manage_principal_ids
 
 检索 target URI 只是搜索范围，不要求调用者能够读取 target 节点本身。用户即使不能读取中间目录，也可以检索到深层单独授权给自己的文件。
 
-共享区 context 写入会保留同 URI 已有 direct ACL，并为新节点从父节点生成 inherited ACL。重新向量化和普通覆盖写不会把受控记录恢复为默认可见，也不能通过普通 context 字段直接改 ACL。
+共享区 context 写入会保留同 URI 已有 direct ACL。新节点为创建者生成直接 `manager`，并从父节点生成 inherited ACL。重新向量化和普通覆盖写不会把受控记录恢复为默认可见，也不能通过普通 context 字段直接改 ACL。
 
 ## 示例
 

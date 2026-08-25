@@ -843,6 +843,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                     result = await self._vikingdb.upsert(
                         inserted_data,
                         ctx=ctx,
+                        acl_creator_user_id=embedding_msg.acl_creator_user_id or None,
                         options=upsert_options,
                     )
                     record_id = result

@@ -335,7 +335,11 @@ class AclManager:
         return (await self.resolve_many([uri], ctx))[uri]
 
     async def materialize_context_records(
-        self, records: Sequence[dict[str, Any]], ctx: RequestContext
+        self,
+        records: Sequence[dict[str, Any]],
+        ctx: RequestContext,
+        *,
+        acl_creator_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         canonical_by_uri: dict[str, str] = {}
         for record in records:
@@ -374,7 +378,16 @@ class AclManager:
             if effective is None:
                 parent = parents[canonical]
                 inherited = parent_acl[parent].permissions if parent else DirectAcl()
-                effective = EffectiveAcl(not inherited.empty, DirectAcl(), inherited)
+                direct = DirectAcl()
+                if acl_creator_user_id is not None and uri_parts(canonical) != ["resources"]:
+                    direct = entries_to_direct(
+                        [AclEntry(f"user:{acl_creator_user_id}", AclLevel.MANAGER)]
+                    )
+                effective = EffectiveAcl(
+                    not direct.empty or not inherited.empty,
+                    direct,
+                    inherited,
+                )
             materialized.append({**record, **effective.context_fields()})
         return materialized
 
@@ -457,6 +470,8 @@ class AclManager:
         entries: Sequence[AclEntry | Mapping[str, Any]],
         ctx: RequestContext,
     ) -> EffectiveAcl:
+        if uri_parts(uri) == ["resources"]:
+            raise InvalidArgumentError("ACL cannot be set on viking://resources")
         proposed = entries_to_direct(entries)
         old_records = await self._subtree_records(uri, ctx)
         try:

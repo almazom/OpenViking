@@ -1873,7 +1873,10 @@ class ReindexExecutor:
             meta=merged_meta,
         )
         context.set_vectorize(Vectorize(text=vector_text))
-        msg = EmbeddingMsgConverter.from_context(context)
+        msg = EmbeddingMsgConverter.from_context(
+            context,
+            acl_creator_ctx=owner_ctx,
+        )
         _apply_ingest_options(msg, ingest_options)
         if msg is None:
             raise OpenVikingError(

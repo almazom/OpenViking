@@ -411,7 +411,10 @@ async def vectorize_directory_meta(
             context_abstract.set_vectorize(
                 Vectorize(text=embedding_text_for_body(ContextLevel.ABSTRACT, uri, abstract))
             )
-            msg_abstract = EmbeddingMsgConverter.from_context(context_abstract)
+            msg_abstract = EmbeddingMsgConverter.from_context(
+                context_abstract,
+                acl_creator_ctx=ctx,
+            )
             _apply_scalar_overrides(
                 msg_abstract,
                 (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value)),
@@ -456,7 +459,10 @@ async def vectorize_directory_meta(
             context_overview.set_vectorize(
                 Vectorize(text=embedding_text_for_body(ContextLevel.OVERVIEW, uri, overview))
             )
-            msg_overview = EmbeddingMsgConverter.from_context(context_overview)
+            msg_overview = EmbeddingMsgConverter.from_context(
+                context_overview,
+                acl_creator_ctx=ctx,
+            )
             _apply_scalar_overrides(
                 msg_overview,
                 (scalar_overrides or {}).get(int(ContextLevel.OVERVIEW.value)),
@@ -616,7 +622,10 @@ async def vectorize_file(
             logger.debug(f"Skipping file {file_path} (no text content or summary)")
             return False
 
-        embedding_msg = EmbeddingMsgConverter.from_context(context)
+        embedding_msg = EmbeddingMsgConverter.from_context(
+            context,
+            acl_creator_ctx=ctx,
+        )
         if not embedding_msg:
             return False
 

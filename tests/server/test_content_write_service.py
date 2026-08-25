@@ -106,6 +106,11 @@ async def test_memory_replace_preserves_metadata(service):
 @pytest.mark.asyncio
 async def test_shared_resource_acl_protects_content_and_recursive_delete(service):
     """Shared resource content stays plain while ACLs protect its operations."""
+    creator = RequestContext(
+        user=service.user,
+        role=Role.USER,
+        group_ids=("grp_writers",),
+    )
     admin = RequestContext(user=service.user, role=Role.ADMIN)
     reader = RequestContext(
         user=UserIdentifier(admin.account_id, "reader"),
@@ -117,18 +122,49 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(service
         role=Role.USER,
     )
     parent_uri = "viking://resources/append_plain"
+    created_dir = f"{parent_uri}/creator_dir"
     uri = "viking://resources/append_plain/journal.md"
     delete_root = "viking://resources/recursive_delete"
     protected_dir = f"{delete_root}/protected"
     protected_file = f"{protected_dir}/notes.md"
 
-    await service.fs.write(uri, content="line1\n", ctx=admin, mode="create", wait=True)
-    await service.fs.write(uri, content="line2\n", ctx=admin, mode="append", wait=True)
-    await service.fs.set_acl(
-        parent_uri,
-        [{"principal": "group:grp_readers", "level": "viewer"}],
+    await service.viking_fs.mkdir(parent_uri, ctx=admin)
+    assert await service.vikingdb_manager.upsert(
+        {
+            "id": "append-plain-parent",
+            "uri": parent_uri,
+            "account_id": admin.account_id,
+            "context_type": "resource",
+            "level": 0,
+            "vector": [0.1] * service.vikingdb_manager.vector_dim,
+        },
         ctx=admin,
     )
+    await service.fs.set_acl(
+        parent_uri,
+        [
+            {"principal": "group:grp_readers", "level": "viewer"},
+            {"principal": "group:grp_writers", "level": "editor"},
+        ],
+        ctx=admin,
+    )
+
+    await service.fs.mkdir(created_dir, ctx=creator)
+    await service.fs.write(uri, content="line1\n", ctx=creator, mode="create", wait=True)
+    creator_entry = {
+        "principal": f"user:{creator.user.user_id}",
+        "level": "manager",
+    }
+    inherited_entries = [
+        {"principal": "group:grp_readers", "level": "viewer"},
+        {"principal": "group:grp_writers", "level": "editor"},
+    ]
+    for created_uri in (created_dir, uri):
+        created_acl = await service.fs.get_acl(created_uri, ctx=creator)
+        assert created_acl["direct_entries"] == [creator_entry]
+        assert created_acl["inherited_entries"] == inherited_entries
+
+    await service.fs.write(uri, content="line2\n", ctx=creator, mode="append", wait=True)
 
     stored = await service.viking_fs.read_file(uri, ctx=reader)
     assert stored == "line1\nline2\n"
@@ -161,6 +197,9 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(service
     with pytest.raises(PermissionDeniedError):
         await service.fs.rm(delete_root, recursive=True, ctx=outsider)
     assert await service.viking_fs.read_file(protected_file, ctx=admin) == "protected"
+
+    with pytest.raises(InvalidArgumentError, match="viking://resources"):
+        await service.fs.set_acl("viking://resources", [], ctx=admin)
 
 
 @pytest.mark.asyncio
