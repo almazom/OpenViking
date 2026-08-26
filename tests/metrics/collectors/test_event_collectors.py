@@ -214,11 +214,11 @@ def test_embedding_collector_maps_call_metrics_and_tokens(registry, render_prome
 
     # Account dimension is supported for embedding families; default runtime resolves to __unknown__.
     assert re.search(
-        r'openviking_embedding_calls_total\{(?=[^}]*account_id="__unknown__")(?=[^}]*model_name="text-embedding-3-large")(?=[^}]*provider="openai")(?=[^}]*result="ok")[^}]*\} 1(?:\.0)?',
+        r'openviking_embedding_calls_total\{(?=[^}]*account_id="__unknown__")(?=[^}]*error_code="OK")(?=[^}]*model_name="text-embedding-3-large")(?=[^}]*provider="openai")[^}]*\} 1(?:\.0)?',
         text,
     )
     assert re.search(
-        r'openviking_embedding_call_duration_seconds_count\{(?=[^}]*account_id="__unknown__")(?=[^}]*model_name="text-embedding-3-large")(?=[^}]*provider="openai")(?=[^}]*result="ok")[^}]*\} 1(?:\.0)?',
+        r'openviking_embedding_call_duration_seconds_count\{(?=[^}]*account_id="__unknown__")(?=[^}]*error_code="OK")(?=[^}]*model_name="text-embedding-3-large")(?=[^}]*provider="openai")[^}]*\} 1(?:\.0)?',
         text,
     )
     assert re.search(
@@ -235,7 +235,7 @@ def test_embedding_collector_maps_call_metrics_and_tokens(registry, render_prome
     )
 
 
-def test_embedding_collector_records_failed_call_duration_with_result(registry, render_prometheus):
+def test_embedding_collector_records_failed_call_duration_with_error_code(registry, render_prometheus):
     EmbeddingCollector().receive(
         "embedding.call",
         {
@@ -244,24 +244,24 @@ def test_embedding_collector_records_failed_call_duration_with_result(registry, 
             "duration_seconds": 0.12,
             "prompt_tokens": 0,
             "completion_tokens": 0,
-            "result": "transient",
+            "error_code": "429",
         },
         registry,
     )
     text = render_prometheus(registry)
 
     assert re.search(
-        r'openviking_embedding_calls_total\{(?=[^}]*model_name="doubao-embedding")(?=[^}]*provider="volcengine")(?=[^}]*result="transient")[^}]*\} 1(?:\.0)?',
+        r'openviking_embedding_calls_total\{(?=[^}]*error_code="429")(?=[^}]*model_name="doubao-embedding")(?=[^}]*provider="volcengine")[^}]*\} 1(?:\.0)?',
         text,
     )
     assert re.search(
-        r'openviking_embedding_call_duration_seconds_count\{(?=[^}]*model_name="doubao-embedding")(?=[^}]*provider="volcengine")(?=[^}]*result="transient")[^}]*\} 1(?:\.0)?',
+        r'openviking_embedding_call_duration_seconds_count\{(?=[^}]*error_code="429")(?=[^}]*model_name="doubao-embedding")(?=[^}]*provider="volcengine")[^}]*\} 1(?:\.0)?',
         text,
     )
     assert "openviking_embedding_tokens_total" not in text
 
 
-def test_vlm_collector_records_result_on_calls_and_duration_only(registry, render_prometheus):
+def test_vlm_collector_records_error_code_on_calls_and_duration_only(registry, render_prometheus):
     VLMCollector().receive(
         "vlm.call",
         {
@@ -270,18 +270,18 @@ def test_vlm_collector_records_result_on_calls_and_duration_only(registry, rende
             "duration_seconds": 0.12,
             "prompt_tokens": 0,
             "completion_tokens": 0,
-            "result": "transient",
+            "error_code": "timeout",
         },
         registry,
     )
     text = render_prometheus(registry)
 
     assert re.search(
-        r'openviking_vlm_calls_total\{(?=[^}]*model_name="doubao-vlm")(?=[^}]*provider="volcengine")(?=[^}]*result="transient")[^}]*\} 1(?:\.0)?',
+        r'openviking_vlm_calls_total\{(?=[^}]*error_code="timeout")(?=[^}]*model_name="doubao-vlm")(?=[^}]*provider="volcengine")[^}]*\} 1(?:\.0)?',
         text,
     )
     assert re.search(
-        r'openviking_vlm_call_duration_seconds_count\{(?=[^}]*model_name="doubao-vlm")(?=[^}]*provider="volcengine")(?=[^}]*result="transient")[^}]*\} 1(?:\.0)?',
+        r'openviking_vlm_call_duration_seconds_count\{(?=[^}]*error_code="timeout")(?=[^}]*model_name="doubao-vlm")(?=[^}]*provider="volcengine")[^}]*\} 1(?:\.0)?',
         text,
     )
     assert "openviking_vlm_tokens_total" not in text

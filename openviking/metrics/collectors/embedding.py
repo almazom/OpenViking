@@ -91,7 +91,7 @@ class EmbeddingCollector(EventMetricCollector):
                 duration_seconds=float(payload["duration_seconds"]),
                 prompt_tokens=int(payload["prompt_tokens"]),
                 completion_tokens=int(payload["completion_tokens"]),
-                result=str(payload.get("result") or "ok"),
+                error_code=str(payload.get("error_code") or "OK"),
                 account_id=(
                     None if payload.get("account_id") is None else str(payload.get("account_id"))
                 ),
@@ -124,30 +124,30 @@ class EmbeddingCollector(EventMetricCollector):
         duration_seconds: float,
         prompt_tokens: int,
         completion_tokens: int,
-        result: str = "ok",
+        error_code: str = "OK",
         account_id: str | None = None,
     ) -> None:
         """Record one embedding provider call as calls/tokens counters and a latency sample."""
         labels = {
             "provider": str(provider),
             "model_name": str(model_name),
-            "result": str(result or "unknown"),
+            "error_code": str(error_code or "unknown"),
         }
         registry.inc_counter(
             self.CALLS_TOTAL,
             labels=labels,
-            label_names=("provider", "model_name", "result"),
+            label_names=("provider", "model_name", "error_code"),
             account_id=account_id,
         )
         registry.observe_histogram(
             self.CALL_DURATION_SECONDS,
             float(duration_seconds),
             labels=labels,
-            label_names=("provider", "model_name", "result"),
+            label_names=("provider", "model_name", "error_code"),
             account_id=account_id,
         )
         token_labels = {"provider": str(provider), "model_name": str(model_name)}
-        if labels["result"] == "ok" and int(prompt_tokens) > 0:
+        if labels["error_code"] == "OK" and int(prompt_tokens) > 0:
             registry.inc_counter(
                 self.TOKENS_INPUT_TOTAL,
                 labels=token_labels,
@@ -155,7 +155,7 @@ class EmbeddingCollector(EventMetricCollector):
                 amount=int(prompt_tokens),
                 account_id=account_id,
             )
-        if labels["result"] == "ok" and int(completion_tokens) > 0:
+        if labels["error_code"] == "OK" and int(completion_tokens) > 0:
             registry.inc_counter(
                 self.TOKENS_OUTPUT_TOTAL,
                 labels=token_labels,
@@ -164,7 +164,7 @@ class EmbeddingCollector(EventMetricCollector):
                 account_id=account_id,
             )
         total_tokens = int(prompt_tokens) + int(completion_tokens)
-        if labels["result"] == "ok" and total_tokens > 0:
+        if labels["error_code"] == "OK" and total_tokens > 0:
             registry.inc_counter(
                 self.TOKENS_TOTAL,
                 labels=token_labels,

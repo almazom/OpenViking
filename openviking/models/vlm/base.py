@@ -14,6 +14,7 @@ from openviking.utils.model_retry import (
     OrderedCredentialSwitcher,
     PrimaryBackupSwitcher,
     classify_api_error,
+    extract_metric_error_code,
 )
 from openviking_cli.utils import get_logger
 
@@ -301,7 +302,7 @@ class VLMBase(ABC):
                 duration_seconds=max(float(duration_seconds), 0.0),
                 prompt_tokens=0,
                 completion_tokens=0,
-                result=classify_api_error(error),
+                error_code=extract_metric_error_code(error),
                 account_id=root_context.account_id if root_context is not None else None,
             )
         except Exception as metrics_error:

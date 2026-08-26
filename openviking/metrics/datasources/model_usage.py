@@ -131,11 +131,11 @@ class VLMEventDataSource(EventMetricDataSource):
         duration_seconds: float,
         prompt_tokens: int,
         completion_tokens: int,
-        result: str = "ok",
+        error_code: str = "OK",
         account_id: str | None = None,
     ) -> None:
         """
-        Emit one VLM call event with model identity, latency, token usage, result, and account context.
+        Emit one VLM call event with model identity, latency, token usage, error code, and account context.
 
         The caller is expected to provide already-normalized provider/model identifiers and the
         final token counts that should be reflected in Prometheus usage metrics.
@@ -148,7 +148,7 @@ class VLMEventDataSource(EventMetricDataSource):
                 "duration_seconds": float(duration_seconds),
                 "prompt_tokens": int(prompt_tokens),
                 "completion_tokens": int(completion_tokens),
-                "result": str(result or "unknown"),
+                "error_code": str(error_code or "unknown"),
                 "account_id": None if account_id is None else str(account_id),
             },
         )
@@ -170,7 +170,7 @@ class EmbeddingEventDataSource(EventMetricDataSource):
         duration_seconds: float,
         prompt_tokens: int,
         completion_tokens: int,
-        result: str = "ok",
+        error_code: str = "OK",
         account_id: str | None = None,
     ) -> None:
         """Emit one embedding provider call with tokens, latency, and optional account context."""
@@ -182,7 +182,7 @@ class EmbeddingEventDataSource(EventMetricDataSource):
                 "duration_seconds": float(duration_seconds),
                 "prompt_tokens": int(prompt_tokens),
                 "completion_tokens": int(completion_tokens),
-                "result": str(result or "unknown"),
+                "error_code": str(error_code or "unknown"),
                 "account_id": None if account_id is None else str(account_id),
             },
         )

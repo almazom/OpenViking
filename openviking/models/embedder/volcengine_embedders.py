@@ -20,7 +20,7 @@ from openviking.models.embedder.base import (
 from openviking.telemetry import get_current_telemetry
 from openviking.metrics.datasources import EmbeddingEventDataSource
 from openviking.observability.context import get_root_observability_context
-from openviking.utils.model_retry import classify_api_error
+from openviking.utils.model_retry import extract_metric_error_code
 from openviking.utils.async_client_cache import LoopScopedAsyncClientCache
 from openviking_cli.utils.logger import default_logger as logger
 
@@ -41,7 +41,7 @@ def _record_failed_embedding_call(
             duration_seconds=max(float(duration_seconds), 0.0),
             prompt_tokens=0,
             completion_tokens=0,
-            result=classify_api_error(error),
+            error_code=extract_metric_error_code(error),
             account_id=root_context.account_id if root_context is not None else None,
         )
     except Exception:

@@ -79,7 +79,7 @@ class VLMCollector(EventMetricCollector):
             duration_seconds=float(payload["duration_seconds"]),
             prompt_tokens=int(payload["prompt_tokens"]),
             completion_tokens=int(payload["completion_tokens"]),
-            result=str(payload.get("result") or "ok"),
+            error_code=str(payload.get("error_code") or "OK"),
             account_id=(
                 None if payload.get("account_id") is None else str(payload.get("account_id"))
             ),
@@ -94,7 +94,7 @@ class VLMCollector(EventMetricCollector):
         duration_seconds: float,
         prompt_tokens: int,
         completion_tokens: int,
-        result: str = "ok",
+        error_code: str = "OK",
         account_id: str | None = None,
     ) -> None:
         """
@@ -106,24 +106,24 @@ class VLMCollector(EventMetricCollector):
         labels = {
             "provider": str(provider),
             "model_name": str(model_name),
-            "result": str(result or "unknown"),
+            "error_code": str(error_code or "unknown"),
         }
         registry.inc_counter(
             self.CALLS_TOTAL,
             labels=labels,
-            label_names=("provider", "model_name", "result"),
+            label_names=("provider", "model_name", "error_code"),
             account_id=account_id,
         )
         registry.observe_histogram(
             self.CALL_DURATION_SECONDS,
             float(duration_seconds),
             labels=labels,
-            label_names=("provider", "model_name", "result"),
+            label_names=("provider", "model_name", "error_code"),
             account_id=account_id,
         )
         # A failed attempt has no reliable usage payload. Keep token families
         # success-only and avoid multiplying their cardinality by ``result``.
-        if labels["result"] != "ok":
+        if labels["error_code"] != "OK":
             return
         token_labels = {"provider": str(provider), "model_name": str(model_name)}
         registry.inc_counter(
