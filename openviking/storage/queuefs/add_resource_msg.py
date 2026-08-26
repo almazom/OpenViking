@@ -55,6 +55,7 @@ class AddResourceMsg:
     parse_mode: str = "default"
     tags: Optional[list[str]] = None
     tag_mode: str = "replace"
+    internal_task: bool = False
 
     def __post_init__(self) -> None:
         inferred = (
@@ -174,4 +175,5 @@ class AddResourceMsg:
             parse_mode=str(data.get("parse_mode") or "default"),
             tags=(list(data["tags"]) if isinstance(data.get("tags"), list) else None),
             tag_mode=str(data.get("tag_mode") or "replace"),
+            internal_task=bool(data.get("internal_task", False)),
         )

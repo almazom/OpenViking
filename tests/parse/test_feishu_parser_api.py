@@ -383,6 +383,7 @@ def test_add_resource_message_round_trips_internal_fields():
         role="user",
         defer_target_resolution=True,
         understanding_response_id="response-1",
+        internal_task=True,
     )
 
     restored = AddResourceMsg.from_dict(msg.to_dict())
@@ -392,6 +393,7 @@ def test_add_resource_message_round_trips_internal_fields():
     assert restored.defer_target_resolution is True
     assert restored.understanding_response_id == "response-1"
     assert restored.job_phase is AddResourcePhase.SOURCE
+    assert restored.internal_task is True
 
 
 def test_add_resource_message_round_trips_processing_mode():
@@ -912,6 +914,7 @@ async def test_add_resource_processor_persists_final_uri_and_cleans_staged_sourc
         role="user",
         telemetry_id=telemetry_id,
         defer_target_resolution=True,
+        internal_task=True,
         staged_source={
             "temp_uri": "viking://temp/account-1/task-1",
             "source_uri": "viking://temp/account-1/task-1/source/document.md",
@@ -937,7 +940,7 @@ async def test_add_resource_processor_persists_final_uri_and_cleans_staged_sourc
         account_id="account-1",
         user_id="user-1",
         task_id="task-1",
-        meta={"source_path": ""},
+        meta={"source_path": "", "internal": True},
     )
     assert task_tracker.complete.await_count == 2
     first_complete = task_tracker.complete.await_args_list[0]

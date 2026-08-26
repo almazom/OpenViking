@@ -24,6 +24,9 @@ from openviking_cli.exceptions import InvalidArgumentError
 
 router = APIRouter(prefix="/api/v1", tags=["resources"])
 
+_CONNECTOR_TASK_ORIGIN_HEADER = "X-OpenViking-Task-Origin"
+_CONNECTOR_TASK_ORIGIN = "connector_import"
+
 
 class AddResourceRequest(BaseModel):
     """Request model for add_resource.
@@ -297,6 +300,10 @@ async def add_resource(
                 tag_mode=request.tag_mode,
                 allow_local_path_resolution=allow_local_path_resolution,
                 enforce_public_remote_targets=True,
+                internal_task=(
+                    http_request.headers.get(_CONNECTOR_TASK_ORIGIN_HEADER, "").strip().lower()
+                    == _CONNECTOR_TASK_ORIGIN
+                ),
                 args=request.args,
                 **kwargs,
             )

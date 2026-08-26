@@ -131,6 +131,7 @@ _ADD_RESOURCE_ARGS_RESERVED_FIELDS = frozenset(
         "prepared_resource",
         "tags",
         "tag_mode",
+        "internal_task",
     }
 )
 _ADD_RESOURCE_TRANSIENT_ARGS = frozenset({"tos_signature", "tos_access"})
@@ -543,7 +544,10 @@ class ResourceService:
                 account_id=msg.account_id,
                 user_id=msg.user_id,
                 task_id=msg.task_id,
-                meta={"source_path": msg.source_path},
+                meta={
+                    "source_path": msg.source_path,
+                    **({"internal": True} if msg.internal_task else {}),
+                },
                 auth=task_auth,
             )
             await get_queue_manager().enqueue(queue_name, msg.to_dict())
@@ -664,6 +668,7 @@ class ResourceService:
                 stage_callback=stage_callback,
                 watch_auth_state=watch_auth_state,
                 prepared_resource=prepared_resource,
+                internal_task=msg.internal_task,
                 **internal_kwargs,
             )
             if msg.staged_source is not None:
@@ -936,6 +941,7 @@ class ResourceService:
         allow_local_path_resolution: bool,
         enforce_public_remote_targets: bool,
         processor_kwargs: Dict[str, Any],
+        internal_task: bool,
     ) -> Dict[str, Any]:
         from openviking.storage.queuefs.add_resource_msg import AddResourceMsg
 
@@ -1012,6 +1018,7 @@ class ResourceService:
                 args=plan.processor_args,
                 defer_target_resolution=defer_target_resolution,
                 understanding_response_id=plan.understanding_response_id,
+                internal_task=internal_task,
             )
 
             def transfer_staged_source() -> None:
@@ -1157,6 +1164,7 @@ class ResourceService:
         allow_local_path_resolution: bool = True,
         enforce_public_remote_targets: bool = False,
         add_type: Optional[str] = None,
+        internal_task: bool = False,
         args: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -1188,6 +1196,7 @@ class ResourceService:
             tag_mode=tag_mode,
             allow_local_path_resolution=allow_local_path_resolution,
             enforce_public_remote_targets=enforce_public_remote_targets,
+            internal_task=internal_task,
             args=args,
             **kwargs,
         )
@@ -1257,6 +1266,7 @@ class ResourceService:
         parse_mode: ParseMode | str | None = None,
         allow_local_path_resolution: bool = True,
         enforce_public_remote_targets: bool = False,
+        internal_task: bool = False,
         args: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -1520,6 +1530,7 @@ class ResourceService:
                 allow_local_path_resolution=allow_local_path_resolution,
                 enforce_public_remote_targets=enforce_public_remote_targets,
                 processor_kwargs=kwargs,
+                internal_task=internal_task,
             )
         else:
             result = await self._execute_resource_ingestion(
@@ -1543,6 +1554,7 @@ class ResourceService:
                 allow_local_path_resolution=allow_local_path_resolution,
                 enforce_public_remote_targets=enforce_public_remote_targets,
                 watch_auth_state=normalized_args.watch_auth_state,
+                internal_task=internal_task,
                 **kwargs,
             )
         get_current_telemetry().set("resource.flags.wait", wait)
@@ -1599,6 +1611,7 @@ class ResourceService:
         resource_lock: Optional[Dict[str, Any]] = None,
         stage_callback: Optional[Callable[[str], Any]] = None,
         prepared_resource: Optional["LocalResource"] = None,
+        internal_task: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """Execute an already-routed resource ingestion."""
@@ -1727,6 +1740,7 @@ class ResourceService:
                     skip_watch_management=True,
                     tags=tags,
                     tag_mode=tag_mode,
+                    internal_task=internal_task,
                 )
                 enqueue_lock = deferred_lock
                 deferred_lock = None
