@@ -57,10 +57,9 @@ class _GrepMixin:
         Returns:
             Dict with matches, count, match_count, files_scanned
         """
-        self._ensure_access(uri, ctx)
         # Skip vector_store.count() — the count field is not needed for grep,
         # and avoiding it saves one VikingDB API call.
-        await self.stat(uri, ctx=ctx, skip_count=True)
+        await self._stat_metadata(uri, ctx=ctx)
 
         # Read engine and threshold from grep_config (ov.conf)
         engine = self.grep_config.engine if self.grep_config else "auto"

@@ -13,6 +13,7 @@ from openviking.pyagfs.exceptions import (
     AGFSClientError,
     AGFSDirectoryNotEmptyError,
     AGFSHTTPError,
+    AGFSIsADirectoryError,
 )
 from openviking.server.error_mapping import is_not_found_error, map_exception
 from openviking.server.identity import RequestContext
@@ -509,6 +510,45 @@ class _OpsMixin:
         finally:
             await self._async_agfs.pathlock_release(child_lease)
 
+    async def _stat_metadata(
+        self,
+        uri: str,
+        ctx: Optional[RequestContext] = None,
+    ) -> tuple[Dict[str, Any], str]:
+        """Return storage metadata without PathLock or vector-derived fields."""
+        self._ensure_access(uri, ctx)
+        real_ctx = self._ctx_or_default(ctx)
+        primary_path = self._uri_to_path(uri, ctx=ctx)
+        path = primary_path
+        last_not_found: Optional[Exception] = None
+        for candidate_path in self._read_paths(uri, ctx=ctx):
+            if not await self._read_path_visible(uri, candidate_path, primary_path, real_ctx):
+                continue
+            try:
+                result = await self._async_agfs.stat(candidate_path)
+                path = candidate_path
+                break
+            except Exception as exc:
+                if is_not_found_error(exc):
+                    last_not_found = exc
+                    continue
+                raise
+        else:
+            if self._is_session_root_uri(uri):
+                now = datetime.now(timezone.utc).isoformat()
+                return (
+                    {
+                        "name": "session",
+                        "size": 0,
+                        "mode": 0o755,
+                        "modTime": now,
+                        "isDir": True,
+                    },
+                    primary_path,
+                )
+            raise NotFoundError(uri, "file") from last_not_found
+        return result, path
+
     async def stat(
         self, uri: str, ctx: Optional[RequestContext] = None, skip_count: bool = False
     ) -> Dict[str, Any]:
@@ -533,36 +573,12 @@ class _OpsMixin:
                 Use this when the count field is not needed (e.g. in grep) to avoid
                 an extra VikingDB API call.
         """
-        self._ensure_access(uri, ctx)
+        result, path = await self._stat_metadata(uri, ctx=ctx)
         real_ctx = self._ctx_or_default(ctx)
-        primary_path = self._uri_to_path(uri, ctx=ctx)
-        path = primary_path
-        last_not_found: Optional[Exception] = None
-        for candidate_path in self._read_paths(uri, ctx=ctx):
-            if not await self._read_path_visible(uri, candidate_path, primary_path, real_ctx):
-                continue
-            try:
-                result = await self._async_agfs.stat(candidate_path)
-                path = candidate_path
-                break
-            except Exception as exc:
-                if is_not_found_error(exc):
-                    last_not_found = exc
-                    continue
-                raise
-        else:
-            if self._is_session_root_uri(uri):
-                now = datetime.now(timezone.utc).isoformat()
-                return {
-                    "name": "session",
-                    "size": 0,
-                    "mode": 0o755,
-                    "modTime": now,
-                    "isDir": True,
-                    "isLocked": False,
-                }
-            raise NotFoundError(uri, "file") from last_not_found
         if isinstance(result, dict):
+            if self._is_session_root_uri(uri):
+                result["isLocked"] = False
+                return result
             result["isLocked"] = await self._is_path_locked_async(path)
             # Add count for directories if vector store available
             if not skip_count and result.get("isDir", False):
@@ -590,7 +606,7 @@ class _OpsMixin:
             bool: True if the URI exists, False otherwise
         """
         try:
-            await self.stat(uri, ctx=ctx)
+            await self._stat_metadata(uri, ctx=ctx)
             return True
         except Exception:
             return False
@@ -942,43 +958,15 @@ class _OpsMixin:
         Raises:
             FileNotFoundError: If the file does not exist.
         """
-        self._ensure_access(uri, ctx)
-        real_ctx = self._ctx_or_default(ctx)
-        primary_path = self._uri_to_path(uri, ctx=ctx)
-        # Verify the file exists before reading, because AGFS read returns
-        # empty bytes for non-existent files instead of raising an error.
-        last_not_found: Optional[Exception] = None
-        for path in self._read_paths(uri, ctx=ctx):
-            if not await self._read_path_visible(uri, path, primary_path, real_ctx):
-                continue
-            try:
-                stat = await self._async_agfs.stat(path)
-                break
-            except Exception as exc:
-                if is_not_found_error(exc):
-                    last_not_found = exc
-                    continue
-                raise
-        else:
-            raise NotFoundError(uri, "file") from last_not_found
-        if isinstance(stat, dict) and stat.get("isDir", False):
+        try:
+            raw = await self.read(uri, ctx=ctx)
+        except AGFSIsADirectoryError as exc:
             raise InvalidArgumentError(
                 f"Directory URI is not readable as a file: {uri}. "
                 "List it first, then read a file URI.",
                 details={"resource": uri, "expected": "file", "actual": "directory"},
-            )
-        try:
-            content = await self._async_agfs.read(path)
-            if isinstance(content, bytes):
-                raw = content
-            elif content is not None and hasattr(content, "content"):
-                raw = content.content
-            else:
-                raw = b""
-
-            text = self._decode_bytes(raw)
-        except Exception:
-            raise NotFoundError(uri, "file")
+            ) from exc
+        text = self._decode_bytes(raw)
 
         if offset == 0 and limit == -1:
             return text
@@ -992,33 +980,13 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
     ) -> bytes:
         """Read single binary file."""
-        self._ensure_access(uri, ctx)
-        real_ctx = self._ctx_or_default(ctx)
-        primary_path = self._uri_to_path(uri, ctx=ctx)
-        last_not_found: Optional[Exception] = None
-        for path in self._read_paths(uri, ctx=ctx):
-            if not await self._read_path_visible(uri, path, primary_path, real_ctx):
-                continue
-            try:
-                stat = await self._async_agfs.stat(path)
-                break
-            except Exception as exc:
-                if is_not_found_error(exc):
-                    last_not_found = exc
-                    continue
-                raise
-        else:
-            raise NotFoundError(uri, "file") from last_not_found
-        if isinstance(stat, dict) and stat.get("isDir", False):
+        try:
+            return await self.read(uri, ctx=ctx)
+        except AGFSIsADirectoryError as exc:
             raise InvalidArgumentError(
                 f"Cannot read directory as file: {uri}",
                 details={"resource": uri, "expected": "file", "actual": "directory"},
-            )
-        try:
-            raw = self._handle_agfs_read(await self._async_agfs.read(path))
-            return raw
-        except Exception:
-            raise NotFoundError(uri, "file")
+            ) from exc
 
     async def write_file_bytes(
         self,

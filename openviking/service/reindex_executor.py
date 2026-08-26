@@ -1931,8 +1931,6 @@ class ReindexExecutor:
     async def _safe_read_text(self, uri: str, *, ctx: RequestContext) -> str:
         viking_fs = get_viking_fs()
         try:
-            if not await viking_fs.exists(uri, ctx=ctx):
-                return ""
             content = await viking_fs.read_file(uri, ctx=ctx)
             if isinstance(content, bytes):
                 return content.decode("utf-8", errors="replace")
