@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Volcengine Embedder Implementation"""
 
+import time
+
 from typing import Any, Dict, List, Optional
 
 import volcenginesdkarkruntime
@@ -144,7 +146,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
         """Multimodal inputs are supported when using the multimodal endpoint."""
         return self.input_type == "multimodal"
 
-    def _update_telemetry_token_usage(self, response) -> None:
+    def _update_telemetry_token_usage(self, response, *, duration_seconds: float) -> None:
         usage = getattr(response, "usage", None)
         if not usage:
             return
@@ -171,6 +173,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
             provider="volcengine",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            duration_seconds=duration_seconds,
         )
 
     def embed(self, content: "EmbeddingInput", is_query: bool = False) -> EmbedResult:
@@ -191,22 +194,28 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
         def _embed_call():
             if self.input_type == "multimodal":
                 # Use multimodal embeddings API
+                started = time.perf_counter()
                 response = self.client.multimodal_embeddings.create(
                     input=to_multimodal_input(content),
                     model=self.model_name,
                     extra_headers=self.extra_headers,
                 )
-                self._update_telemetry_token_usage(response)
+                self._update_telemetry_token_usage(
+                    response, duration_seconds=time.perf_counter() - started
+                )
                 vector = response.data.embedding
             else:
                 # Use text embeddings API (text-only)
                 text = extract_text_from_content(content)
+                started = time.perf_counter()
                 response = self.client.embeddings.create(
                     input=text,
                     model=self.model_name,
                     extra_headers=self.extra_headers,
                 )
-                self._update_telemetry_token_usage(response)
+                self._update_telemetry_token_usage(
+                    response, duration_seconds=time.perf_counter() - started
+                )
                 vector = response.data[0].embedding
 
             vector = truncate_and_normalize(vector, self.dimension)
@@ -231,21 +240,27 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
 
         async def _embed_call() -> EmbedResult:
             if self.input_type == "multimodal":
+                started = time.perf_counter()
                 response = await client.multimodal_embeddings.create(
                     input=to_multimodal_input(content),
                     model=self.model_name,
                     extra_headers=self.extra_headers,
                 )
-                self._update_telemetry_token_usage(response)
+                self._update_telemetry_token_usage(
+                    response, duration_seconds=time.perf_counter() - started
+                )
                 vector = response.data.embedding
             else:
                 text = extract_text_from_content(content)
+                started = time.perf_counter()
                 response = await client.embeddings.create(
                     input=text,
                     model=self.model_name,
                     extra_headers=self.extra_headers,
                 )
-                self._update_telemetry_token_usage(response)
+                self._update_telemetry_token_usage(
+                    response, duration_seconds=time.perf_counter() - started
+                )
                 vector = response.data[0].embedding
 
             return EmbedResult(dense_vector=truncate_and_normalize(vector, self.dimension))
@@ -308,7 +323,7 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
         self._ark_kwargs = ark_kwargs
         self._async_client_cache = LoopScopedAsyncClientCache()
 
-    def _update_telemetry_token_usage(self, response) -> None:
+    def _update_telemetry_token_usage(self, response, *, duration_seconds: float) -> None:
         usage = getattr(response, "usage", None)
         if not usage:
             return
@@ -335,6 +350,7 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
             provider="volcengine",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            duration_seconds=duration_seconds,
         )
 
     def embed(self, content: "EmbeddingInput", is_query: bool = False) -> EmbedResult:
@@ -354,13 +370,16 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
 
         def _embed_call():
             # Must use multimodal endpoint for sparse
+            started = time.perf_counter()
             response = self.client.multimodal_embeddings.create(
                 input=to_multimodal_input(content),
                 model=self.model_name,
                 sparse_embedding={"type": "enabled"},
                 extra_headers=self.extra_headers,
             )
-            self._update_telemetry_token_usage(response)
+            self._update_telemetry_token_usage(
+                response, duration_seconds=time.perf_counter() - started
+            )
             item = response.data
             sparse_vector = getattr(item, "sparse_embedding", None)
             return EmbedResult(sparse_vector=process_sparse_embedding(sparse_vector))
@@ -383,13 +402,16 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
         client = self._get_async_client()
 
         async def _embed_call() -> EmbedResult:
+            started = time.perf_counter()
             response = await client.multimodal_embeddings.create(
                 input=to_multimodal_input(content),
                 model=self.model_name,
                 sparse_embedding={"type": "enabled"},
                 extra_headers=self.extra_headers,
             )
-            self._update_telemetry_token_usage(response)
+            self._update_telemetry_token_usage(
+                response, duration_seconds=time.perf_counter() - started
+            )
             item = response.data
             sparse_vector = getattr(item, "sparse_embedding", None)
             return EmbedResult(sparse_vector=process_sparse_embedding(sparse_vector))
@@ -466,7 +488,7 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
         self._async_client_cache = LoopScopedAsyncClientCache()
         self._dimension = dimension or 2048
 
-    def _update_telemetry_token_usage(self, response) -> None:
+    def _update_telemetry_token_usage(self, response, *, duration_seconds: float) -> None:
         usage = getattr(response, "usage", None)
         if not usage:
             return
@@ -493,6 +515,7 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
             provider="volcengine",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            duration_seconds=duration_seconds,
         )
 
     @property
@@ -524,13 +547,16 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
         def _embed_call():
             # Always use multimodal for hybrid to get both
 
+            started = time.perf_counter()
             response = self.client.multimodal_embeddings.create(
                 input=to_multimodal_input(content),
                 model=self.model_name,
                 sparse_embedding={"type": "enabled"},
                 extra_headers=self.extra_headers,
             )
-            self._update_telemetry_token_usage(response)
+            self._update_telemetry_token_usage(
+                response, duration_seconds=time.perf_counter() - started
+            )
             item = response.data
             dense_vector = truncate_and_normalize(item.embedding, self.dimension)
             sparse_vector = getattr(item, "sparse_embedding", None)
@@ -557,13 +583,16 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
         client = self._get_async_client()
 
         async def _embed_call() -> EmbedResult:
+            started = time.perf_counter()
             response = await client.multimodal_embeddings.create(
                 input=to_multimodal_input(content),
                 model=self.model_name,
                 sparse_embedding={"type": "enabled"},
                 extra_headers=self.extra_headers,
             )
-            self._update_telemetry_token_usage(response)
+            self._update_telemetry_token_usage(
+                response, duration_seconds=time.perf_counter() - started
+            )
             item = response.data
             dense_vector = truncate_and_normalize(item.embedding, self.dimension)
             sparse_vector = getattr(item, "sparse_embedding", None)
