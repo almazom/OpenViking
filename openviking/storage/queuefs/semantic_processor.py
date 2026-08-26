@@ -260,12 +260,15 @@ class SemanticProcessor(DequeueHandlerBase):
             or parent_uri == uri.rstrip("/")
         ):
             return
+        parent_ctx = self._ctx_from_semantic_msg(msg)
+        if msg.generation_trigger == "resource_ingest":
+            parent_ctx.role = Role.ADMIN
         semantic_config = get_openviking_config().semantic
         decision = await plan_abstract_overview_refresh(
             viking_fs=get_viking_fs(),
             dir_uri=parent_uri,
             changed_entries=1,
-            ctx=self._ctx_from_semantic_msg(msg),
+            ctx=parent_ctx,
             l0_body_changed=l0_body_changed,
             # This helper handles automatic upward propagation only. Manual
             # refresh/ingest bypasses the threshold for its requested root,
@@ -298,7 +301,7 @@ class SemanticProcessor(DequeueHandlerBase):
             user_id=msg.user_id,
             group_ids=msg.group_ids,
             peer_id=msg.peer_id,
-            role=msg.role,
+            role=str(parent_ctx.role),
             skip_vectorization=msg.skip_vectorization,
             changes={"modified": [uri]},
             generation_trigger="parent_refresh",

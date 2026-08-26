@@ -8,6 +8,7 @@ Handles summarization and key information extraction.
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from openviking.core.namespace import context_type_for_uri
+from openviking.server.identity import Role
 from openviking.storage.queuefs import SemanticMsg, get_queue_manager
 from openviking.storage.queuefs.semantic_msg import build_semantic_coalesce_key
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
@@ -57,7 +58,7 @@ class Summarizer:
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
             peer_id=ctx.user.user_id,
-            role=str(ctx.role),
+            role=str(Role.ADMIN),
             skip_vectorization=skip_vectorization,
             telemetry_id=telemetry_id,
             changes={"added" if created else "modified": [file_uri]},

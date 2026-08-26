@@ -27,7 +27,7 @@ ACL entries use typed principals:
 - `user:*`: any user in the current account.
 
 `group:*` is not supported. Groups are flat. Membership changes do not rewrite resource ACL or context records; they take effect when the next request builds `RequestContext.group_ids`.
-Asynchronous parse and semantic tasks created by a request carry the same group identity, so one authorized operation uses consistent permissions across its foreground and background stages.
+Asynchronous parse and semantic tasks created by a request carry the same group identity. After an `add-resource` destination write has been authorized, its automatic ancestor summary refresh is account-internal maintenance and runs as `ADMIN`.
 
 | Level | Allowed operations |
 |-------|--------------------|
@@ -82,12 +82,12 @@ All filesystem APIs use the same permission mapping:
 | Operation | Required capability |
 |-----------|---------------------|
 | read, stat, list, tree, find, search, grep, glob, relations | read |
-| write, create, mkdir, set tags, reindex | write |
+| write, create, mkdir, set tags | write |
 | delete, manage ACL | manage |
 | move source | manage |
 | move destination parent | write |
 
-The server canonicalizes the URI, then uses one authorization entry point for account/owner/actor-peer boundaries, the effective ACL or legacy fallback, and write/delete namespace guards. Ordinary writes, deletes, and reindexing do not maintain separate permission rules.
+The server canonicalizes the URI, then uses one authorization entry point for account/owner/actor-peer boundaries, the effective ACL or legacy fallback, and write/delete namespace guards.
 
 Under an ACL-controlled parent, a new shared node is bootstrapped by its creator's direct `manager` grant. Under a parent without ACL, creation does not bootstrap ACL and only the shared scope's implicit manager can establish the first ACL. Later ACL changes require effective `manage` capability.
 

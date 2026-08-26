@@ -27,7 +27,7 @@ ACL 条目使用带类型的 principal：
 - `user:*`：当前 account 内任意用户。
 
 不支持 `group:*`。用户组是平铺结构；修改成员关系不会重写资源 ACL 或 context 记录，而是在下一次请求构造 `RequestContext.group_ids` 时生效。
-请求创建的异步解析和语义任务会携带同一份 group 身份，保证一个已授权操作的前后台阶段使用一致权限。
+请求创建的异步解析和语义任务会携带同一份 group 身份。`add-resource` 写入目标通过鉴权后，自动向上的祖先摘要刷新属于 account 内部维护，以 `ADMIN` 身份执行。
 
 | Level | 允许的操作 |
 |-------|------------|
@@ -82,12 +82,12 @@ acl_enabled = true
 | 操作 | 所需能力 |
 |------|----------|
 | read、stat、list、tree、find、search、grep、glob、relations | read |
-| write、create、mkdir、set tags、reindex | write |
+| write、create、mkdir、set tags | write |
 | delete、管理 ACL | manage |
 | move 源节点 | manage |
 | move 目标父目录 | write |
 
-服务端会先 canonicalize URI，再在同一个鉴权入口中依次执行 account/owner/actor peer 等硬边界、有效 ACL 或 legacy fallback，以及写入和删除的 namespace 防护。普通写入、删除和 reindex 不维护各自的权限特判。
+服务端会先 canonicalize URI，再在同一个鉴权入口中依次执行 account/owner/actor peer 等硬边界、有效 ACL 或 legacy fallback，以及写入和删除的 namespace 防护。
 
 父目录已有 ACL 时，新建共享节点由创建者的直接 `manager` 完成权限 bootstrap。父目录没有 ACL 时不会自动 bootstrap，首次设置 ACL 只能由共享区隐式管理者完成；启用后，后续 ACL 修改要求有效 `manage` 能力。
 
