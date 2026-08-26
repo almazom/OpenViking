@@ -10,6 +10,8 @@ import asyncio
 import contextlib
 import inspect
 import json
+import os
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -1136,18 +1138,27 @@ class ResourceService:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        except TimeoutError as exc:
+        except BaseException as exc:
             if proc is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    if os.name == "posix":
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
                 with contextlib.suppress(Exception):
-                    proc.kill()
-                    await proc.communicate()
-            raise InvalidArgumentError(
-                "Cannot access Git repository; the preflight timed out after 10s."
-            ) from exc
-        except Exception as exc:
-            raise InvalidArgumentError("Cannot access Git repository during preflight.") from exc
+                    await asyncio.wait_for(
+                        asyncio.shield(proc.communicate()), timeout=1.0
+                    )
+            if isinstance(exc, asyncio.TimeoutError):
+                raise InvalidArgumentError(
+                    "Cannot access Git repository; the preflight timed out after 10s."
+                ) from exc
+            if isinstance(exc, Exception):
+                raise InvalidArgumentError("Cannot access Git repository during preflight.") from exc
+            raise
 
         if proc.returncode != 0:
             raise InvalidArgumentError("Cannot access Git repository; git ls-remote failed.")
