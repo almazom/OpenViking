@@ -79,6 +79,7 @@ class VLMCollector(EventMetricCollector):
             duration_seconds=float(payload["duration_seconds"]),
             prompt_tokens=int(payload["prompt_tokens"]),
             completion_tokens=int(payload["completion_tokens"]),
+            result=str(payload.get("result") or "ok"),
             account_id=(
                 None if payload.get("account_id") is None else str(payload.get("account_id"))
             ),
@@ -93,6 +94,7 @@ class VLMCollector(EventMetricCollector):
         duration_seconds: float,
         prompt_tokens: int,
         completion_tokens: int,
+        result: str = "ok",
         account_id: str | None = None,
     ) -> None:
         """
@@ -101,37 +103,46 @@ class VLMCollector(EventMetricCollector):
         Input, output, and total token counters are all emitted because different dashboards care
         about cost attribution at different levels of granularity.
         """
-        labels = {"provider": str(provider), "model_name": str(model_name)}
+        labels = {
+            "provider": str(provider),
+            "model_name": str(model_name),
+            "result": str(result or "unknown"),
+        }
         registry.inc_counter(
             self.CALLS_TOTAL,
             labels=labels,
-            label_names=("provider", "model_name"),
+            label_names=("provider", "model_name", "result"),
             account_id=account_id,
         )
         registry.observe_histogram(
             self.CALL_DURATION_SECONDS,
             float(duration_seconds),
             labels=labels,
-            label_names=("provider", "model_name"),
+            label_names=("provider", "model_name", "result"),
             account_id=account_id,
         )
+        # A failed attempt has no reliable usage payload. Keep token families
+        # success-only and avoid multiplying their cardinality by ``result``.
+        if labels["result"] != "ok":
+            return
+        token_labels = {"provider": str(provider), "model_name": str(model_name)}
         registry.inc_counter(
             self.TOKENS_INPUT_TOTAL,
-            labels=labels,
+            labels=token_labels,
             label_names=("provider", "model_name"),
             amount=int(prompt_tokens),
             account_id=account_id,
         )
         registry.inc_counter(
             self.TOKENS_OUTPUT_TOTAL,
-            labels=labels,
+            labels=token_labels,
             label_names=("provider", "model_name"),
             amount=int(completion_tokens),
             account_id=account_id,
         )
         registry.inc_counter(
             self.TOKENS_TOTAL,
-            labels=labels,
+            labels=token_labels,
             label_names=("provider", "model_name"),
             amount=int(prompt_tokens) + int(completion_tokens),
             account_id=account_id,
