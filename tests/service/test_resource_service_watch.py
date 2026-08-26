@@ -172,6 +172,7 @@ class TestWatchTaskCreation:
         task = await get_task_by_uri(resource_service, to_uri, request_context)
         assert task is not None
         assert task.path == "/test/path"
+        assert task.source_type == "local"
         assert task.to_uri == to_uri
         assert task.reason == "Test monitoring"
         assert task.instruction == "Monitor for changes"
@@ -520,6 +521,7 @@ class TestAddResourceArgs:
 
         task = await get_task_by_uri(resource_service, to_uri, request_context)
         assert task is not None
+        assert task.source_type == "feishu"
         assert task.processor_kwargs == {}
         assert task.auth_state == {
             "provider": "feishu",
@@ -609,6 +611,7 @@ class TestAddResourceArgs:
 
         task = await get_task_by_uri(resource_service, to_uri, request_context)
         assert task is not None
+        assert task.source_type == "git"
         assert task.processor_kwargs == {
             "branch": "main",
             "source_name": "private",

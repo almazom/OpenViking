@@ -255,6 +255,20 @@ class ResourceService:
             watch_kwargs["tag_mode"] = tag_mode
         return watch_kwargs
 
+    @staticmethod
+    def _infer_watch_source_type(path: str) -> Optional[str]:
+        if not path:
+            return None
+        from openviking.parse.accessors.feishu_accessor import FeishuAccessor
+
+        if FeishuAccessor._is_feishu_url(path):
+            return "feishu"
+        if is_git_repo_url(path):
+            return "git"
+        if is_remote_resource_source(path):
+            return "url"
+        return "local"
+
     def _validate_add_resource_tag_policy(
         self,
         *,
@@ -302,6 +316,7 @@ class ResourceService:
         processor_kwargs: Dict[str, Any],
         watch_auth_state: Optional[Dict[str, Any]],
         ctx: RequestContext,
+        source_type: Optional[str] = None,
     ) -> None:
         if not watch_manager or not manage_watch:
             return
@@ -343,6 +358,7 @@ class ResourceService:
                         processing_mode=processing_mode,
                         processor_kwargs=sanitized,
                         auth_state=watch_auth_state,
+                        source_type=source_type or self._infer_watch_source_type(path),
                         ctx=ctx,
                     )
                 except ConflictError:
@@ -1456,6 +1472,7 @@ class ResourceService:
                         processor_kwargs=connector_watch_processor_kwargs,
                         watch_auth_state=watch_auth_state,
                         ctx=ctx,
+                        source_type=resolved[0],
                     )
 
                 on_success = create_watch_after_success
@@ -1490,6 +1507,7 @@ class ResourceService:
                     processor_kwargs=connector_watch_processor_kwargs,
                     watch_auth_state=watch_auth_state,
                     ctx=ctx,
+                    source_type=resolved[0],
                 )
             return result
 
@@ -1899,6 +1917,7 @@ class ResourceService:
         processing_mode: ProcessingMode,
         processor_kwargs: Dict[str, Any],
         auth_state: Optional[Dict[str, Any]],
+        source_type: Optional[str],
         ctx: RequestContext,
     ) -> None:
         """Handle creation or update of watch task.
@@ -1934,6 +1953,7 @@ class ResourceService:
                 user_id=ctx.user.user_id,
                 role=str(ctx.role),
                 path=path,
+                source_type=source_type,
                 to_uri=to_uri,
                 to_is_directory=to_is_directory,
                 parent_uri=parent_uri,
@@ -1957,6 +1977,7 @@ class ResourceService:
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
                 original_role=str(ctx.role),
+                source_type=source_type,
                 to_uri=to_uri,
                 to_is_directory=to_is_directory,
                 parent_uri=parent_uri,
