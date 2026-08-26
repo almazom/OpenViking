@@ -9,11 +9,15 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from openviking.server.auth import get_request_context
 from openviking.server.app import create_app
+from openviking.server.auth import get_request_context
 from openviking.server.config import ServerConfig
 from openviking.server.identity import RequestContext, Role
-from openviking_cli.exceptions import InvalidArgumentError, InvalidURIError
+from openviking_cli.exceptions import (
+    InvalidArgumentError,
+    InvalidURIError,
+    PermissionDeniedError,
+)
 from openviking_cli.session.user_id import UserIdentifier
 
 pytestmark = pytest.mark.asyncio
@@ -186,24 +190,91 @@ async def client_with_resource_and_blob(client_with_resource, service):
     yield client, commit_oid, blob_uri, expected_bytes
 
 
-async def test_restore_dry_run_does_not_mutate(client_with_resource):
-    client, _root = client_with_resource
-    v1 = (await client.post("/api/v1/snapshot/commit", json={"message": "v1"})).json()["result"]
-
-    resp = await client.post(
-        "/api/v1/snapshot/restore",
-        json={
-            "project_dir": "viking://resources",
-            "source_commit": v1["commit_oid"],
-            "dry_run": True,
-        },
+async def test_restore_dry_run_does_not_mutate(client_with_resource, service):
+    _, _root = client_with_resource
+    admin = RequestContext(user=service.user, role=Role.ADMIN)
+    editor = RequestContext(
+        user=UserIdentifier(admin.account_id, "snapshot_editor"),
+        role=Role.USER,
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["status"] == "ok"
-    result = body["result"]
-    # Per VikingFS.restore contract, dry_run responses carry 'diff'.
-    assert "diff" in result or result.get("result") == "noop"
+    viewer = RequestContext(
+        user=UserIdentifier(admin.account_id, "snapshot_viewer"),
+        role=Role.USER,
+    )
+    manager = RequestContext(
+        user=UserIdentifier(admin.account_id, "snapshot_manager"),
+        role=Role.USER,
+    )
+    root = "viking://resources/snapshot_acl_restore"
+    file_uri = f"{root}/document.md"
+    extra_uri = f"{root}/remove.md"
+
+    await service.fs.mkdir(root, ctx=admin)
+    assert await service.vikingdb_manager.upsert(
+        {
+            "id": "snapshot-acl-restore-root",
+            "uri": root,
+            "account_id": admin.account_id,
+            "context_type": "resource",
+            "level": 0,
+            "vector": [0.1] * service.vikingdb_manager.vector_dim,
+        },
+        ctx=admin,
+    )
+    await service.fs.set_acl(
+        root,
+        [
+            {"principal": "user:snapshot_editor", "level": "editor"},
+            {"principal": "user:snapshot_viewer", "level": "viewer"},
+            {"principal": "user:snapshot_manager", "level": "manager"},
+        ],
+        ctx=admin,
+    )
+    await service.fs.write(file_uri, content="v1", mode="create", wait=True, ctx=admin)
+    v1 = await service.fs.commit(message="acl restore v1", paths=[root], ctx=editor)
+
+    assert await service.fs.show(v1["commit_oid"], path=file_uri, ctx=viewer)
+    assert await service.fs.log(paths=[root], ctx=viewer)
+    with pytest.raises(PermissionDeniedError):
+        await service.fs.commit(message="viewer cannot commit", paths=[root], ctx=viewer)
+
+    await service.fs.write(file_uri, content="v2", mode="replace", wait=True, ctx=editor)
+    await service.fs.commit(message="acl restore v2", paths=[root], ctx=editor)
+
+    with pytest.raises(PermissionDeniedError):
+        await service.fs.restore(
+            project_dir=root,
+            source_commit=v1["commit_oid"],
+            dry_run=True,
+            ctx=viewer,
+        )
+
+    write_plan = await service.fs.restore(
+        project_dir=root,
+        source_commit=v1["commit_oid"],
+        dry_run=True,
+        ctx=editor,
+    )
+    assert [item["path"] for item in write_plan["diff"]["to_write"]] == ["document.md"]
+
+    await service.fs.write(extra_uri, content="remove", mode="create", wait=True, ctx=admin)
+    await service.fs.commit(message="acl restore delete", paths=[root], ctx=admin)
+    with pytest.raises(PermissionDeniedError):
+        await service.fs.restore(
+            project_dir=root,
+            source_commit=v1["commit_oid"],
+            dry_run=True,
+            ctx=editor,
+        )
+
+    delete_plan = await service.fs.restore(
+        project_dir=root,
+        source_commit=v1["commit_oid"],
+        dry_run=True,
+        ctx=manager,
+    )
+    assert delete_plan["diff"]["to_delete"] == ["remove.md"]
+    assert await service.fs.read(file_uri, ctx=editor) == "v2"
 
 
 async def test_show_commit_metadata(client_with_resource):
