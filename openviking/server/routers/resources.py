@@ -63,7 +63,8 @@ class AddResourceRequest(BaseModel):
             watch_interval > 0 the credentials are stored in private watch state.
             For Feishu one-time user-token imports,
             pass {"feishu_access_token": "..."}. For Feishu user-token watches,
-            pass {"feishu_access_token": "...", "feishu_refresh_token": "..."}.
+            also pass "feishu_refresh_token". The optional "feishu_app_id" and
+            "feishu_app_secret" pair overrides the server app for that watch.
         watch_interval: Watch interval in minutes for automatic resource monitoring.
             - watch_interval > 0: Creates or updates a watch task. The resource will be
               automatically re-processed at the specified interval.

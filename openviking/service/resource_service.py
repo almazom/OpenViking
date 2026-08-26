@@ -24,8 +24,11 @@ from openviking.parse.mode import ParseMode, normalize_parse_mode
 from openviking.parse.parsers.constants import MPEG_TS_EXTENSION_ALIAS
 from openviking.resource.feishu_watch_auth import (
     FEISHU_ACCESS_TOKEN_ARG,
+    FEISHU_APP_ID_ARG,
+    FEISHU_APP_SECRET_ARG,
     FEISHU_AUTH_PROVIDER,
     FEISHU_REFRESH_TOKEN_ARG,
+    FeishuAppCredentials,
     create_feishu_auth_state,
     is_feishu_auth_state,
     load_feishu_app_credentials,
@@ -386,6 +389,9 @@ class ResourceService:
             raise InvalidArgumentError(str(exc).replace("parse_mode", "args.parse_mode")) from exc
         token = normalized.get(FEISHU_ACCESS_TOKEN_ARG)
         refresh_token = normalized.pop(FEISHU_REFRESH_TOKEN_ARG, None)
+        app_id = normalized.pop(FEISHU_APP_ID_ARG, None)
+        app_secret = normalized.pop(FEISHU_APP_SECRET_ARG, None)
+        has_app_credentials = app_id is not None or app_secret is not None
         watch_auth_state = None
         if token is not None:
             if not isinstance(token, str) or not token.strip():
@@ -398,28 +404,61 @@ class ResourceService:
                         "args.feishu_refresh_token must be a non-empty string when "
                         "args.feishu_access_token is used with watch_interval > 0."
                     )
-                self._ensure_feishu_credentials_for_watch()
-                watch_auth_state = create_feishu_auth_state(token, refresh_token.strip())
+                app_credentials = self._load_feishu_credentials_for_watch(app_id, app_secret)
+                watch_auth_state = create_feishu_auth_state(
+                    token,
+                    refresh_token.strip(),
+                    app_credentials,
+                )
             elif refresh_token is not None:
                 raise InvalidArgumentError(
                     "args.feishu_refresh_token is only supported with "
+                    "args.feishu_access_token and watch_interval > 0."
+                )
+            elif has_app_credentials:
+                raise InvalidArgumentError(
+                    "args.feishu_app_id and args.feishu_app_secret are only supported with "
                     "args.feishu_access_token and watch_interval > 0."
                 )
         elif refresh_token is not None:
             raise InvalidArgumentError(
                 "args.feishu_refresh_token requires args.feishu_access_token."
             )
+        elif has_app_credentials:
+            raise InvalidArgumentError(
+                "args.feishu_app_id and args.feishu_app_secret require "
+                "args.feishu_access_token and watch_interval > 0."
+            )
 
         return _NormalizedAddResourceArgs(normalized, watch_auth_state, parse_mode)
 
-    def _ensure_feishu_credentials_for_watch(self) -> None:
+    def _load_feishu_credentials_for_watch(
+        self,
+        app_id: Any,
+        app_secret: Any,
+    ) -> Optional[FeishuAppCredentials]:
+        supplied = app_id is not None or app_secret is not None
+        if supplied and (
+            not isinstance(app_id, str)
+            or not app_id.strip()
+            or not isinstance(app_secret, str)
+            or not app_secret.strip()
+        ):
+            raise InvalidArgumentError(
+                "args.feishu_app_id and args.feishu_app_secret must be non-empty strings "
+                "and provided together."
+            )
         try:
-            load_feishu_app_credentials()
+            credentials = load_feishu_app_credentials(
+                app_id=app_id.strip() if supplied else None,
+                app_secret=app_secret.strip() if supplied else None,
+            )
         except Exception as exc:
             raise InvalidArgumentError(
                 "Feishu user-token watch requires FEISHU_APP_ID and "
                 "FEISHU_APP_SECRET, or feishu.app_id and feishu.app_secret in ov.conf."
             ) from exc
+        return credentials if supplied else None
 
     def _ensure_initialized(self) -> None:
         """Ensure all dependencies are initialized."""
