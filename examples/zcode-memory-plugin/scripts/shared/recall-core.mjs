@@ -344,7 +344,7 @@ async function buildFallbackInjectionBlock(fetchJSON, items, cfg, actorPeerId = 
   const lines = [
     "<openviking-context>",
     `✧ OV · recall ×${items.length}`,
-    "When a recalled item is used in your reply, cite it inline with glyphs: ✧ recall · ⌕ search · ▤ read (omit if none used).",
+    "Match the glyph to HOW you got it: remembered without tools → ✧; used viking search → ⌕; used the read tool → ▤. Format: <glyph> <fact> — viking://uri. Cite only items you actually used; omit glyphs otherwise.",
   ];
   let contentCount = 0;
   let hintCount = 0;
