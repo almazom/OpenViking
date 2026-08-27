@@ -17,6 +17,7 @@ _CONTENT_TYPES_BY_SCOPE = {
 }
 _PEER_CONTENT_SEGMENTS = frozenset({"memories", "resources"})
 _USER_RELATIVE_ROOT_SEGMENTS = frozenset({"peers", "privacy", "sessions"})
+_CONTENT_SEGMENT_BY_KIND = {"resource": "resources", "skill": "skills"}
 
 
 class NamespaceShapeError(ValueError):
@@ -397,6 +398,7 @@ def content_owner_context_for_uri(uri: str, ctx: RequestContext) -> RequestConte
         actor_peer_id=ctx.actor_peer_id,
         from_oauth=ctx.from_oauth,
         api_key=ctx.api_key,
+        bypass_acl=ctx.bypass_acl,
     )
 
 

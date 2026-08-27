@@ -441,6 +441,7 @@ fn contextual_help_command(command: &str) -> Option<String> {
                 "remove-user",
                 "set-role",
                 "regenerate-key",
+                "set-account-settings",
             ],
         )),
         "system" => Some(system_help_command(program, &tokens)),

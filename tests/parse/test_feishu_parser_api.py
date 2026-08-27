@@ -495,7 +495,7 @@ async def test_uat_producer_payload_reaches_worker_without_persisting_token(
         args={"feishu_access_token": "u-secret", "custom_option": "forwarded"},
     )
 
-    expected_initial = {"status": "accepted", "task_id": "task-1"}
+    expected_initial = {"status": "success", "task_id": "task-1"}
     if preflight_name:
         expected_initial["root_uri"] = root_uri
     assert initial_result == expected_initial

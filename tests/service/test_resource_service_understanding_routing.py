@@ -98,7 +98,7 @@ async def test_extensionless_remote_url_queues_frozen_understanding_route(
     )
 
     assert result == {
-        "status": "accepted",
+        "status": "success",
         "root_uri": "viking://resources/manual",
         "task_id": "task-1",
     }
@@ -191,7 +191,7 @@ async def test_remote_mpeg_ts_url_queues_understanding_after_prepare(
     )
 
     assert result == {
-        "status": "accepted",
+        "status": "success",
         "root_uri": "viking://resources/video/sample",
         "task_id": "task-1",
     }

@@ -75,19 +75,6 @@ def normalize_actor_peer_header(value: Optional[str]) -> Optional[str]:
         raise InvalidArgumentError(str(exc)) from exc
 
 
-def resolve_actor_peer_headers(
-    actor_peer_header: Optional[str],
-    legacy_agent_header: Optional[str],
-) -> Optional[str]:
-    actor_peer_id = normalize_actor_peer_header(actor_peer_header)
-    legacy_agent_id = normalize_actor_peer_header(legacy_agent_header)
-    if actor_peer_id and legacy_agent_id and actor_peer_id != legacy_agent_id:
-        raise InvalidArgumentError(
-            "X-OpenViking-Agent and X-OpenViking-Actor-Peer must match when both are set."
-        )
-    return actor_peer_id or legacy_agent_id
-
-
 def _explicit_identity_from_request(request: Request) -> tuple[Optional[str], Optional[str]]:
     path_params = getattr(request, "path_params", {}) or {}
     query_params = request.query_params
@@ -153,8 +140,8 @@ def _build_request_context(
         )
     update_root_span_identity(
         request_state=request.state,
-        account_id=account_id,
-        user_id=user_id,
+        account_id=identity.account_id,
+        user_id=identity.user_id,
     )
     return ctx
 
@@ -184,7 +171,6 @@ async def get_request_context(
     request: Request,
     identity: ResolvedIdentity = Depends(resolve_identity),
     x_openviking_actor_peer: Optional[str] = Header(None, alias="X-OpenViking-Actor-Peer"),
-    x_openviking_agent: Optional[str] = Header(None, alias="X-OpenViking-Agent"),
     x_api_key_ctx: Optional[str] = Header(None, alias="X-API-Key"),
     authorization_ctx: Optional[str] = Header(None, alias="Authorization"),
 ) -> RequestContext:
@@ -192,7 +178,7 @@ async def get_request_context(
     return _build_request_context(
         request,
         identity,
-        actor_peer_id=resolve_actor_peer_headers(x_openviking_actor_peer, x_openviking_agent),
+        actor_peer_id=normalize_actor_peer_header(x_openviking_actor_peer),
         api_key=_extract_api_key(x_api_key_ctx, authorization_ctx),
     )
 
@@ -219,7 +205,6 @@ async def get_upload_request_context(
     x_openviking_account: Optional[str] = Header(None, alias="X-OpenViking-Account"),
     x_openviking_user: Optional[str] = Header(None, alias="X-OpenViking-User"),
     x_openviking_actor_peer: Optional[str] = Header(None, alias="X-OpenViking-Actor-Peer"),
-    x_openviking_agent: Optional[str] = Header(None, alias="X-OpenViking-Agent"),
 ) -> RequestContext:
     """Two-layer auth for the ``temp_upload`` route: API key first, else a signed token.
 
@@ -261,14 +246,7 @@ async def get_upload_request_context(
     identity = await resolve_identity(
         request, x_api_key, authorization, x_openviking_account, x_openviking_user
     )
-    return await get_request_context(
-        request,
-        identity,
-        x_openviking_actor_peer,
-        x_openviking_agent,
-        x_api_key,
-        authorization,
-    )
+    return await get_request_context(request, identity, x_openviking_actor_peer)
 
 
 def require_role(*allowed_roles: Role):

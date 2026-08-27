@@ -9,8 +9,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from openviking.server.app import create_app
 from openviking.server.auth import get_request_context
+from openviking.server.app import create_app
 from openviking.server.config import ServerConfig
 from openviking.server.identity import RequestContext, Role
 from openviking_cli.exceptions import (

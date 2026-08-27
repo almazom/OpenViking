@@ -86,7 +86,6 @@ class LegacyAPIKeyManager:
         self._accounts: Dict[str, AccountInfo] = {}
         # Prefix index: key_prefix -> list[UserKeyEntry]
         self._prefix_index: Dict[str, list[UserKeyEntry]] = {}
-        self._group_lock = asyncio.Lock()
         self._user_group_ids: Dict[tuple[str, str], tuple[str, ...]] = {}
         # Serializes reload() so overlapping refreshes can't interleave.
         self._reload_lock = asyncio.Lock()
@@ -196,13 +195,10 @@ class LegacyAPIKeyManager:
                 users=users,
                 groups=groups,
             )
-            group_ids_by_user: Dict[str, list[str]] = {}
-            for group_id, group in groups.items():
-                for user_id in group.get("members", []):
-                    if user_id in users:
-                        group_ids_by_user.setdefault(user_id, []).append(group_id)
-            for user_id, group_ids in group_ids_by_user.items():
-                user_group_ids[(account_id, user_id)] = tuple(sorted(set(group_ids)))
+            user_group_ids.update({
+                (account_id, user_id): group_ids
+                for user_id, group_ids in self._group_memberships(users, groups).items()
+            })
 
             for user_id, user_info in users.items():
                 key_or_hash = user_info.get("key", "")
@@ -379,7 +375,7 @@ class LegacyAPIKeyManager:
         try:
             await self._save_accounts_json()
             await self._save_users_json(account_id)
-            await self._save_groups_json(account_id)
+            await self._write_groups_json(account_id, {})
         except Exception:
             await self._rollback_create_account(account_id)
             raise
@@ -539,7 +535,7 @@ class LegacyAPIKeyManager:
 
     async def finish_user_deletion(self, account_id: str, user_id: str, task_id: str) -> bool:
         """Remove the user only when this task still owns the deletion fence."""
-        async with self._reload_lock, self._user_deletion_lock, self._group_lock:
+        async with self._reload_lock, self._user_deletion_lock:
             account = self._accounts.get(account_id)
             if account is None:
                 return False
@@ -784,7 +780,7 @@ class LegacyAPIKeyManager:
 
     async def create_group(self, account_id: str, name: str) -> dict:
         name = self._normalize_group_name(name)
-        async with self._reload_lock, self._group_lock:
+        async with self._reload_lock:
             account = self._require_account(account_id)
             if any(group.get("name") == name for group in account.groups.values()):
                 raise AlreadyExistsError(name, "group")
@@ -808,7 +804,7 @@ class LegacyAPIKeyManager:
         return sorted(set(group.get("members", [])))
 
     async def add_group_member(self, account_id: str, group_id: str, user_id: str) -> bool:
-        async with self._reload_lock, self._group_lock:
+        async with self._reload_lock:
             account = self._require_account(account_id)
             if user_id not in account.users:
                 raise NotFoundError(user_id, "user")
@@ -822,7 +818,7 @@ class LegacyAPIKeyManager:
             return True
 
     async def remove_group_member(self, account_id: str, group_id: str, user_id: str) -> bool:
-        async with self._reload_lock, self._group_lock:
+        async with self._reload_lock:
             account = self._require_account(account_id)
             group = self._require_group(account_id, group_id)
             if user_id not in group.get("members", []):
@@ -835,7 +831,7 @@ class LegacyAPIKeyManager:
             return True
 
     async def delete_group(self, account_id: str, group_id: str) -> None:
-        async with self._reload_lock, self._group_lock:
+        async with self._reload_lock:
             account = self._require_account(account_id)
             group = self._require_group(account_id, group_id)
             if group.get("members"):
@@ -916,13 +912,26 @@ class LegacyAPIKeyManager:
         account = self._accounts.get(account_id)
         if account is None:
             return
+        self._user_group_ids.update({
+            (account_id, user_id): group_ids
+            for user_id, group_ids in self._group_memberships(
+                account.users, account.groups
+            ).items()
+        })
+
+    @staticmethod
+    def _group_memberships(
+        users: Dict[str, dict], groups: Dict[str, dict]
+    ) -> Dict[str, tuple[str, ...]]:
         group_ids_by_user: Dict[str, list[str]] = {}
-        for group_id, group in account.groups.items():
+        for group_id, group in groups.items():
             for user_id in group.get("members", []):
-                if user_id in account.users:
+                if user_id in users:
                     group_ids_by_user.setdefault(user_id, []).append(group_id)
-        for user_id, group_ids in group_ids_by_user.items():
-            self._user_group_ids[(account_id, user_id)] = tuple(sorted(set(group_ids)))
+        return {
+            user_id: tuple(sorted(set(group_ids)))
+            for user_id, group_ids in group_ids_by_user.items()
+        }
 
     async def _replace_groups(
         self, account_id: str, account: AccountInfo, groups: Dict[str, dict]
@@ -1072,8 +1081,3 @@ class LegacyAPIKeyManager:
     async def _write_groups_json(self, account_id: str, groups: dict) -> None:
         path = GROUPS_PATH_TEMPLATE.format(account_id=account_id)
         await self._write_json(path, {"groups": groups})
-
-    async def _save_groups_json(self, account_id: str) -> None:
-        account = self._accounts.get(account_id)
-        if account is not None:
-            await self._write_groups_json(account_id, account.groups)

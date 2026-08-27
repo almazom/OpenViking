@@ -252,7 +252,7 @@ class NewAPIKeyManager:
         try:
             await self._legacy._save_accounts_json()
             await self._legacy._save_users_json(account_id)
-            await self._legacy._save_groups_json(account_id)
+            await self._legacy._write_groups_json(account_id, {})
         except Exception:
             await self._legacy._rollback_create_account(account_id)
             raise
@@ -559,6 +559,3 @@ class NewAPIKeyManager:
 
     async def _save_users_json(self, account_id: str) -> None:
         return await self._legacy._save_users_json(account_id)
-
-    async def _save_groups_json(self, account_id: str) -> None:
-        return await self._legacy._save_groups_json(account_id)

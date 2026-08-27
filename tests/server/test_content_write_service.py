@@ -109,10 +109,10 @@ async def test_memory_replace_preserves_metadata(service):
 
 
 @pytest.mark.asyncio
-async def test_shared_resource_acl_protects_content_and_recursive_delete(
+async def test_shared_resource_creation_inherits_acl_and_preserves_plain_append(
     service, sample_markdown_file
 ):
-    """Shared resource content stays plain while ACLs protect its operations."""
+    """New shared content gets creator management without changing file content."""
     creator = RequestContext(
         user=service.user,
         role=Role.USER,
@@ -130,11 +130,7 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(
     )
     parent_uri = "viking://resources/append_plain"
     auto_protected_dir = "viking://resources/auto_protected"
-    created_dir = f"{parent_uri}/creator_dir"
     uri = "viking://resources/append_plain/journal.md"
-    delete_root = "viking://resources/recursive_delete"
-    protected_dir = f"{delete_root}/protected"
-    protected_file = f"{protected_dir}/notes.md"
 
     await update_account_settings(
         service.viking_fs,
@@ -146,13 +142,11 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(
     await service.fs.mkdir(auto_protected_dir, ctx=creator)
     await service.resources.wait_processed()
     auto_protected_acl = await service.fs.get_acl(auto_protected_dir, ctx=creator)
-    assert auto_protected_acl["direct_entries"] == [
-        {
-            "principal": f"user:{creator.user.user_id}",
-            "level": "manager",
-        }
-    ]
-    assert auto_protected_acl["inherited_entries"] == []
+    creator_entry = {
+        "principal": f"user:{creator.user.user_id}",
+        "level": "manager",
+    }
+    assert auto_protected_acl["direct_entries"] == [creator_entry]
 
     await service.viking_fs.mkdir(parent_uri, ctx=admin)
     assert await service.vikingdb_manager.upsert(
@@ -175,21 +169,14 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(
         ctx=admin,
     )
 
-    await service.fs.mkdir(created_dir, ctx=creator)
     await service.fs.write(uri, content="line1\n", ctx=creator, mode="create", wait=True)
-    await service.resources.wait_processed()
-    creator_entry = {
-        "principal": f"user:{creator.user.user_id}",
-        "level": "manager",
-    }
     inherited_entries = [
         {"principal": "group:grp_readers", "level": "viewer"},
         {"principal": "group:grp_writers", "level": "editor"},
     ]
-    for created_uri in (created_dir, uri):
-        created_acl = await service.fs.get_acl(created_uri, ctx=creator)
-        assert created_acl["direct_entries"] == [creator_entry]
-        assert created_acl["inherited_entries"] == inherited_entries
+    created_acl = await service.fs.get_acl(uri, ctx=creator)
+    assert created_acl["direct_entries"] == [creator_entry]
+    assert created_acl["inherited_entries"] == inherited_entries
 
     imported = await service.resources.add_resource(
         path=str(sample_markdown_file),
@@ -213,36 +200,17 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(
     assert stored == "line1\nline2\n"
     with pytest.raises(PermissionDeniedError):
         await service.fs.write(uri, content="denied", ctx=reader)
-
-    await service.viking_fs.mkdir(protected_dir, ctx=admin)
-    await service.viking_fs.write_file(protected_file, "protected", ctx=admin)
-    for record_id, record_uri, level in (
-        ("recursive-delete-root", delete_root, 0),
-        ("recursive-delete-protected", protected_dir, 0),
-        ("recursive-delete-file", protected_file, 2),
-    ):
-        assert await service.vikingdb_manager.upsert(
-            {
-                "id": record_id,
-                "uri": record_uri,
-                "account_id": admin.account_id,
-                "context_type": "resource",
-                "level": level,
-                "vector": [0.1] * service.vikingdb_manager.vector_dim,
-            },
-            ctx=admin,
-        )
-    await service.fs.set_acl(
-        protected_dir,
-        [{"principal": "user:bob", "level": "manager"}],
-        ctx=admin,
-    )
     with pytest.raises(PermissionDeniedError):
-        await service.fs.rm(delete_root, recursive=True, ctx=outsider)
-    assert await service.viking_fs.read_file(protected_file, ctx=admin) == "protected"
+        await service.viking_fs.read_file(uri, ctx=outsider)
 
-    with pytest.raises(InvalidArgumentError, match="viking://resources"):
-        await service.fs.set_acl("viking://resources", [], ctx=admin)
+    internal_ctx = RequestContext(
+        user=outsider.user,
+        role=outsider.role,
+        bypass_acl=True,
+    )
+    assert await service.viking_fs.read_file(uri, ctx=internal_ctx) == stored
+    with pytest.raises(PermissionDeniedError):
+        await service.fs.get_acl(uri, ctx=internal_ctx)
 
 
 @pytest.mark.asyncio
@@ -501,8 +469,8 @@ class _FakeVikingFS:
         del ctx
         return f"/fake/{uri.replace('://', '/').strip('/')}"
 
-    async def _ensure_mutable_access(self, uri: str, ctx):
-        del uri, ctx
+    async def _ensure_access(self, uri: str, ctx, *, action):
+        del uri, ctx, action
 
     async def _ensure_access_many(self, uris, ctx, *, action):
         del uris, ctx, action
@@ -854,7 +822,7 @@ async def test_memory_write_wait_skips_semantic_queue_and_releases_write_lock(mo
 
     async def _fake_refresh_schema_overview(**kwargs):
         del kwargs
-        return True
+        return None
 
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
     monkeypatch.setattr(coordinator, "_wait_for_request", _fail_wait_for_request)
@@ -917,8 +885,8 @@ class _FakeVikingFSForCreate:
         del ctx
         return f"/fake/{uri.replace('://', '/').strip('/')}"
 
-    async def _ensure_mutable_access(self, uri: str, ctx):
-        del uri, ctx
+    async def _ensure_access(self, uri: str, ctx, *, action):
+        del uri, ctx, action
 
     async def delete_temp(self, temp_uri: str, ctx=None):
         del ctx

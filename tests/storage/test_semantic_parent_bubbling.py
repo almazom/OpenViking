@@ -41,6 +41,7 @@ async def test_unchanged_l0_does_not_mark_or_enqueue_parent(monkeypatch):
     msg = SemanticMsg(
         uri="viking://resources/root/child",
         context_type="resource",
+        role=str(Role.USER),
         generation_trigger="resource_ingest",
     )
     await SemanticProcessor()._enqueue_parent_refresh(
@@ -49,7 +50,8 @@ async def test_unchanged_l0_does_not_mark_or_enqueue_parent(monkeypatch):
 
     assert plan.await_args.kwargs["l0_body_changed"] is False
     assert plan.await_args.kwargs["force_refresh"] is False
-    assert plan.await_args.kwargs["ctx"].role == Role.ADMIN
+    assert plan.await_args.kwargs["ctx"].bypass_acl is True
+    assert plan.await_args.kwargs["ctx"].role == Role.USER
     get_queue_manager.assert_not_called()
 
 

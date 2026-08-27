@@ -22,6 +22,7 @@ from openviking.storage.abstract_overview import (
     read_abstract_overview_pending_snapshot,
     write_abstract_overview,
 )
+from openviking.storage.acl import CreatorAclGrant
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry import bind_telemetry, get_current_telemetry
 from openviking.utils.ingest_options import IngestOptions
@@ -198,6 +199,7 @@ class SemanticDagExecutor:
         self._changed_paths = {
             path for key in ("added", "modified", "deleted") for path in self._changes.get(key, [])
         }
+        self._added_paths = {path.rstrip("/") for path in self._changes.get("added", [])}
         self._node_concurrency = max(1, max_concurrent_llm)
         self._llm_sem = asyncio.Semaphore(max_concurrent_llm)
         self._viking_fs = get_viking_fs()
@@ -218,19 +220,15 @@ class SemanticDagExecutor:
         self._overview_cache_lock = asyncio.Lock()
         self._root_write_result = AbstractOverviewWriteResult(wrote=False)
 
-    def _acl_creator_direct(self, uri: str) -> bool | None:
+    def _creator_acl_grant(self, uri: str) -> CreatorAclGrant | None:
         normalized = uri.rstrip("/")
         if self._generation_trigger == "resource_ingest" and self._target_preexisting is False:
             root = self._root_uri.rstrip("/")
             if normalized == root:
-                return True
+                return CreatorAclGrant.DIRECT
             if normalized.startswith(f"{root}/"):
-                return False
-        return (
-            True
-            if normalized in (path.rstrip("/") for path in self._changes.get("added", []))
-            else None
-        )
+                return CreatorAclGrant.INHERITED
+        return CreatorAclGrant.DIRECT if normalized in self._added_paths else None
 
     async def run(self, root_uri: str) -> None:
         """Run DAG execution starting from root_uri."""
@@ -715,7 +713,7 @@ class SemanticDagExecutor:
                     ctx=self._ctx,
                     use_summary=use_summary,
                     ingest_options=self._ingest_options,
-                    acl_creator_direct=self._acl_creator_direct(file_path),
+                    creator_acl_grant=self._creator_acl_grant(file_path),
                 )
             except Exception as e:
                 logger.error(
@@ -971,7 +969,7 @@ class SemanticDagExecutor:
                         overview=overview,
                         ctx=self._ctx,
                         ingest_options=self._ingest_options,
-                        acl_creator_direct=self._acl_creator_direct(dir_uri),
+                        creator_acl_grant=self._creator_acl_grant(dir_uri),
                     )
                 except Exception as e:
                     logger.error(

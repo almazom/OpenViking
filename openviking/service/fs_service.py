@@ -25,6 +25,7 @@ from openviking.storage.abstract_overview import (
     plan_abstract_overview_refresh,
     render_abstract_overview,
 )
+from openviking.storage.acl import CreatorAclGrant
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.queuefs import SemanticMsg, get_queue_manager
 from openviking.storage.queuefs.semantic_msg import build_semantic_coalesce_key
@@ -230,7 +231,9 @@ class FSService:
             overview="",
             context_type=context_type_for_uri(directory_uri),
             ctx=ctx,
-            acl_creator_direct=True if not directory_preexisting else None,
+            creator_acl_grant=(
+                CreatorAclGrant.DIRECT if not directory_preexisting else None
+            ),
             include_overview=False,
         )
 

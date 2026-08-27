@@ -264,7 +264,6 @@ async def test_user_deletion_fence_revokes_key_and_rejects_stale_finish(
     new_key = await manager.register_user(acct, "bob", "user")
     assert await manager.finish_user_deletion(acct, "bob", "delete-1") is False
     assert manager.resolve(new_key).user_id == "bob"
-
 async def test_regenerate_key(manager: APIKeyManager):
     """Regenerating key should invalidate old key and return new valid key."""
     acct = _uid()

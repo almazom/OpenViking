@@ -40,7 +40,7 @@ def _build(
 def _tenant_filter(ctx: RequestContext):
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
-    return backend._tenant_filter(ctx, context_type="resource")
+    return backend._tenant_filter(ctx)
 
 
 def test_descendant_target_elides_only_visible_root_path_filter():
@@ -213,6 +213,15 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl():
         context_type="resource",
         target_directories=[cross_user_uri],
     )
+    internal = await backend.search_in_tenant(
+        ctx=RequestContext(
+            user=ctx.user,
+            role=ctx.role,
+            bypass_acl=True,
+        ),
+        query_vector=[1.0],
+        context_type="resource",
+    )
 
     assert [record["id"] for record in visible] == [
         "own",
@@ -221,6 +230,14 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl():
         "inherited-shared",
     ]
     assert cross_user_only == []
+    assert [record["id"] for record in internal] == [
+        "own",
+        "cross-user",
+        "legacy-shared",
+        "direct-shared",
+        "inherited-shared",
+        "denied-shared",
+    ]
 
 
 def test_segment_prefix_and_visible_root_ancestor_do_not_elide_tenant_filter():

@@ -44,7 +44,7 @@ from openviking.retrieve.context_assembler import (
 )
 from openviking.server.auth import (
     _extract_api_key,
-    resolve_actor_peer_headers,
+    normalize_actor_peer_header,
     resolve_group_ids,
     resolve_identity,
 )
@@ -168,9 +168,8 @@ class _IdentityASGIMiddleware:
                 x_openviking_account=request.headers.get("x-openviking-account"),
                 x_openviking_user=request.headers.get("x-openviking-user"),
             )
-            actor_peer_id = resolve_actor_peer_headers(
-                request.headers.get("x-openviking-actor-peer"),
-                request.headers.get("x-openviking-agent"),
+            actor_peer_id = normalize_actor_peer_header(
+                request.headers.get("x-openviking-actor-peer")
             )
         except (UnauthenticatedError, PermissionDeniedError, InvalidArgumentError) as exc:
             status = (

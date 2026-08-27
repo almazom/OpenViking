@@ -898,9 +898,10 @@ class VikingVectorIndexBackend:
     async def update_collection_schema(
         self, fields: List[Dict[str, Any]], scalar_index: List[str]
     ) -> None:
-        await self._get_default_backend().update_collection_schema(fields, scalar_index)
+        default_backend = self._get_default_backend()
+        await default_backend.update_collection_schema(fields, scalar_index)
         for backend in [*self._account_backends.values(), self._root_backend]:
-            if backend is not None:
+            if backend is not None and backend is not default_backend:
                 await backend._refresh_meta_data_async()
 
     # =========================================================================
@@ -912,7 +913,6 @@ class VikingVectorIndexBackend:
         data: Dict[str, Any],
         *,
         ctx: RequestContext,
-        _acl_materialized: bool = False,
         options: UpsertOptions | Mapping[str, Any] | None = None,
     ) -> str:
         """Main write entrypoint.
@@ -929,9 +929,8 @@ class VikingVectorIndexBackend:
             options.partial_update,
             options.search_tag_mode,
         )
-        if not _acl_materialized:
-            data = {key: value for key, value in data.items() if key not in ACL_CONTEXT_FIELDS}
-            data = (await self._materialize_acl_fields([data], ctx))[0]
+        data = {key: value for key, value in data.items() if key not in ACL_CONTEXT_FIELDS}
+        data = (await self._materialize_acl_fields([data], ctx))[0]
         backend = self._get_backend_for_context(ctx)
         logger.debug(
             "[VikingVectorIndexBackend.upsert] Using backend for account_id=%s",
@@ -951,11 +950,7 @@ class VikingVectorIndexBackend:
         return result
 
     async def upsert_many(
-        self,
-        data_list: List[Dict[str, Any]],
-        *,
-        ctx: RequestContext,
-        _acl_materialized: bool = False,
+        self, data_list: List[Dict[str, Any]], *, ctx: RequestContext
     ) -> List[str]:
         """Bulk full-record upsert.
 
@@ -971,20 +966,24 @@ class VikingVectorIndexBackend:
             ctx.account_id,
             len(data_list),
         )
-        if not _acl_materialized:
-            data_list = [
-                {key: value for key, value in record.items() if key not in ACL_CONTEXT_FIELDS}
-                for record in data_list
-            ]
-            data_list = await self._materialize_acl_fields(data_list, ctx)
-        backend = self._get_backend_for_context(ctx)
-        result = await backend.upsert_many(data_list)
+        data_list = [
+            {key: value for key, value in record.items() if key not in ACL_CONTEXT_FIELDS}
+            for record in data_list
+        ]
+        data_list = await self._materialize_acl_fields(data_list, ctx)
+        result = await self._upsert_many_raw(data_list, ctx=ctx)
         logger.debug(
             "[VikingVectorIndexBackend.upsert_many] Completed with count=%s, result_count=%s",
             len(data_list),
             len(result),
         )
         return result
+
+    async def _upsert_many_raw(
+        self, data_list: List[Dict[str, Any]], *, ctx: RequestContext
+    ) -> List[str]:
+        """Write records whose ACL fields have already been materialized."""
+        return await self._get_backend_for_context(ctx).upsert_many(data_list)
 
     async def _materialize_acl_fields(
         self, records: List[Dict[str, Any]], ctx: RequestContext
@@ -1265,18 +1264,6 @@ class VikingVectorIndexBackend:
         else:
             backend = self._get_default_backend()
         return await backend.count(filter=filter)
-
-    async def count_in_tenant(
-        self,
-        ctx: RequestContext,
-        filter: Optional[Dict[str, Any] | FilterExpr] = None,
-    ) -> int:
-        if isinstance(filter, dict):
-            filter = RawDSL(filter)
-        return await self.count(
-            filter=self._merge_filters(filter, self._tenant_filter(ctx)),
-            ctx=ctx,
-        )
 
     async def search_by_keywords(
         self,
@@ -1563,11 +1550,7 @@ class VikingVectorIndexBackend:
 
         if not updated_records:
             return False
-        new_ids = await self.upsert_many(
-            updated_records,
-            ctx=ctx,
-            _acl_materialized=bool(self.acl_manager),
-        )
+        new_ids = await self._upsert_many_raw(updated_records, ctx=ctx)
         if len(new_ids) != len(updated_records):
             raise RuntimeError(
                 f"Failed to update {len(updated_records) - len(new_ids)} URI mapping record(s)"
@@ -1612,7 +1595,7 @@ class VikingVectorIndexBackend:
             filters.append(Eq("context_type", context_type))
 
         targets = [target_dir for target_dir in target_directories or [] if target_dir]
-        tenant_filter = self._tenant_filter(ctx, context_type=context_type)
+        tenant_filter = self._tenant_filter(ctx)
         if (
             tenant_filter
             and not self.acl_manager
@@ -1655,9 +1638,9 @@ class VikingVectorIndexBackend:
             for target_parts in (tuple(uri_parts(target)) for target in targets)
         )
 
-    def _tenant_filter(
-        self, ctx: RequestContext, context_type: Optional[str] = None
-    ) -> Optional[FilterExpr]:
+    def _tenant_filter(self, ctx: RequestContext) -> Optional[FilterExpr]:
+        if ctx.bypass_acl:
+            return Eq("account_id", ctx.account_id)
         if ctx.role == Role.ROOT:
             return None
 

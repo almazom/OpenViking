@@ -79,7 +79,6 @@ from openviking_cli.exceptions import (
     NotInitializedError,
 )
 from openviking_cli.utils import get_logger
-from openviking_cli.utils.uri import VikingURI
 
 if TYPE_CHECKING:
     from openviking.connector.delegate import ConnectorDelegate
@@ -1003,7 +1002,7 @@ class ResourceService:
                 await self._viking_fs.delete_temp(plan.staged_source.temp_uri, ctx=ctx)
             raise
 
-        response = {"status": "accepted", "task_id": task.task_id}
+        response = {"status": "success", "task_id": task.task_id}
         if not defer_target_resolution:
             response["root_uri"] = root_uri
         return response
@@ -1047,33 +1046,18 @@ class ResourceService:
             )
             return root_uri, resource_lock, False
 
-        write_scope = await self._ensure_planned_target_write_access(root_uri, ctx)
+        await self._viking_fs._ensure_access(root_uri, ctx, action=AclAction.WRITE)
         dst_path = self._viking_fs._uri_to_path(root_uri, ctx=ctx)
         resource_lock = await self._viking_fs._async_agfs.pathlock_acquire_tree(
             dst_path,
             timeout_secs=0.0,
         )
         try:
-            await self._viking_fs._ensure_access(write_scope, ctx, action=AclAction.WRITE)
+            await self._viking_fs._ensure_access(root_uri, ctx, action=AclAction.WRITE)
         except BaseException:
             await self._release_lock_ref(resource_lock)
             raise
         return root_uri, resource_lock, False
-
-    async def _ensure_planned_target_write_access(
-        self,
-        target_uri: str,
-        ctx: RequestContext,
-    ) -> str:
-        """Check target admission and return the URI whose WRITE access governs it."""
-        if await self._viking_fs.exists(target_uri, ctx=ctx):
-            await self._viking_fs._ensure_access(target_uri, ctx, action=AclAction.WRITE)
-            return target_uri
-        parent_uri = VikingURI(target_uri).parent
-        if parent_uri is None:
-            raise InvalidArgumentError(f"Resource target must have a parent: {target_uri}")
-        await self._viking_fs._ensure_access(parent_uri.uri, ctx, action=AclAction.WRITE)
-        return parent_uri.uri
 
     @staticmethod
     def _target_doc_name(

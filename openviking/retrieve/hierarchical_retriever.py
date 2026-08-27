@@ -232,9 +232,7 @@ class HierarchicalRetriever:
             telemetry.count("vector.scanned", len(global_results))
 
             leaf_results: List[Dict[str, Any]] = []
-            if getattr(self.vector_store, "acl_manager", None) is not None and (
-                level is None or 2 in level
-            ):
+            if self.vector_store.acl_manager is not None and (level is None or 2 in level):
                 leaf_results = await vector_proxy.search_in_tenant(
                     query_vector=query_vector,
                     sparse_query_vector=sparse_query_vector,
@@ -247,7 +245,7 @@ class HierarchicalRetriever:
                 telemetry.count("vector.searches", 1)
                 telemetry.count("vector.scored", len(leaf_results))
                 telemetry.count("vector.scanned", len(leaf_results))
-                if self._rerank_client and leaf_results:
+                if self._rerank_client and mode == RetrieverMode.THINKING and leaf_results:
                     leaf_scores = await self._rerank_scores(
                         query.query,
                         [str(result.get("abstract", "")) for result in leaf_results],

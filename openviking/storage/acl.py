@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, S
 from openviking.core.identifiers import validate_identifier_part, validate_user_id
 from openviking.core.namespace import uri_parts
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.expr import Or, PathScope
+from openviking.storage.expr import FilterExpr, Or, PathScope
 from openviking_cli.exceptions import InvalidArgumentError
 
 if TYPE_CHECKING:
@@ -28,6 +28,11 @@ class AclAction(str, Enum):
     MANAGE = "manage"
 
 
+class CreatorAclGrant(str, Enum):
+    DIRECT = "direct"
+    INHERITED = "inherited"
+
+
 _LEVEL_RANK = {
     AclLevel.VIEWER: 1,
     AclLevel.EDITOR: 2,
@@ -38,7 +43,7 @@ ACL_PRINCIPAL_FIELDS = tuple(
     f"{prefix}_{action.value}_principal_ids" for prefix in _ACL_PREFIXES for action in AclAction
 )
 ACL_CONTEXT_FIELDS = frozenset(("acl_enabled", *ACL_PRINCIPAL_FIELDS))
-ACL_CREATOR_DIRECT_FIELD = "_acl_creator_direct"
+ACL_CREATOR_GRANT_FIELD = "_acl_creator_grant"
 _ACL_OUTPUT_FIELDS = ["uri", *sorted(ACL_CONTEXT_FIELDS)]
 
 
@@ -192,6 +197,10 @@ def direct_to_entries(acl: DirectAcl) -> list[AclEntry]:
     return entries
 
 
+def is_acl_uri(uri: str) -> bool:
+    return uri_parts(uri)[:1] == ["resources"]
+
+
 def acl_ancestors(uri: str) -> list[str]:
     """Return ACL-bearing ancestors from the resource root through *uri*."""
     parts = uri_parts(uri)
@@ -201,7 +210,7 @@ def acl_ancestors(uri: str) -> list[str]:
 
 
 def is_implicit_manager(ctx: RequestContext, uri: str) -> bool:
-    return uri_parts(uri)[:1] == ["resources"] and ctx.role == Role.ADMIN
+    return is_acl_uri(uri) and ctx.role == Role.ADMIN
 
 
 def acl_allows(acl: EffectiveAcl, ctx: RequestContext, action: AclAction) -> bool:
@@ -219,7 +228,6 @@ class AclManager:
     ) -> None:
         self._context_store = context_store
         self._auto_protect_new_content = auto_protect_new_content
-        context_store.acl_manager = self
 
     @staticmethod
     def _effective_from_record(record: Mapping[str, Any]) -> EffectiveAcl:
@@ -261,34 +269,33 @@ class AclManager:
         records: list[dict[str, Any]] = []
         for offset in range(0, len(unique), 100):
             conditions = [PathScope("uri", uri, depth=0) for uri in unique[offset : offset + 100]]
-            cursor: str | None = None
-            while True:
-                page, cursor = await self._context_store.scroll(
-                    filter=Or(conditions),
-                    limit=500,
-                    cursor=cursor,
-                    output_fields=_ACL_OUTPUT_FIELDS,
-                    ctx=ctx,
-                )
-                records.extend(page)
-                if cursor is None:
-                    break
+            records.extend(
+                await self._scroll_all(Or(conditions), _ACL_OUTPUT_FIELDS, ctx)
+            )
         return records
 
-    async def _subtree_records(self, uri: str, ctx: RequestContext) -> list[dict[str, Any]]:
-        refs: list[dict[str, Any]] = []
+    async def _scroll_all(
+        self,
+        filter_expr: FilterExpr,
+        output_fields: list[str],
+        ctx: RequestContext,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
             page, cursor = await self._context_store.scroll(
-                filter=PathScope("uri", uri, depth=-1),
+                filter=filter_expr,
                 limit=500,
                 cursor=cursor,
-                output_fields=["id"],
+                output_fields=output_fields,
                 ctx=ctx,
             )
-            refs.extend(page)
+            records.extend(page)
             if cursor is None:
-                break
+                return records
+
+    async def _subtree_records(self, uri: str, ctx: RequestContext) -> list[dict[str, Any]]:
+        refs = await self._scroll_all(PathScope("uri", uri, depth=-1), ["id"], ctx)
         ids = [str(record["id"]) for record in refs if record.get("id")]
         records: list[dict[str, Any]] = []
         for offset in range(0, len(ids), 500):
@@ -305,17 +312,17 @@ class AclManager:
     async def resolve_many(
         self, uris: Iterable[str], ctx: RequestContext
     ) -> dict[str, EffectiveAcl]:
-        canonical_uris = list(dict.fromkeys(uris))
-        paths = {uri: acl_ancestors(uri) for uri in canonical_uris}
-        exact_records = await self._records_for_uris(canonical_uris, ctx)
+        unique_uris = list(dict.fromkeys(uris))
+        paths = {uri: acl_ancestors(uri) for uri in unique_uris}
+        exact_records = await self._records_for_uris(unique_uris, ctx)
         exact_groups = self._group_by_uri(exact_records)
         result = {
             uri: self._effective_from_records(exact_groups[uri])
-            for uri in canonical_uris
+            for uri in unique_uris
             if uri in exact_groups
         }
 
-        missing = [uri for uri in canonical_uris if uri not in result]
+        missing = [uri for uri in unique_uris if uri not in result]
         if missing:
             ancestor_records = await self._records_for_uris(
                 (ancestor for uri in missing for ancestor in paths[uri]), ctx
@@ -343,26 +350,24 @@ class AclManager:
     async def materialize_context_records(
         self, records: Sequence[dict[str, Any]], ctx: RequestContext
     ) -> list[dict[str, Any]]:
-        canonical_by_uri: dict[str, str] = {}
+        resource_uris: set[str] = set()
         for record in records:
             uri = record.get("uri")
             if not uri:
                 continue
-            canonical = str(uri)
-            try:
-                acl_ancestors(canonical)
-            except InvalidArgumentError:
+            resource_uri = str(uri)
+            if not is_acl_uri(resource_uri):
                 continue
-            canonical_by_uri[str(uri)] = canonical
-        if not canonical_by_uri:
+            resource_uris.add(resource_uri)
+        if not resource_uris:
             return list(records)
 
-        existing = await self._records_for_uris(canonical_by_uri.values(), ctx)
+        existing = await self._records_for_uris(resource_uris, ctx)
         existing_groups = self._group_by_uri(existing)
         existing_acl = {
             uri: self._effective_from_records(items) for uri, items in existing_groups.items()
         }
-        new_uris = [uri for uri in canonical_by_uri.values() if uri not in existing_acl]
+        new_uris = resource_uris.difference(existing_acl)
         parents: dict[str, str | None] = {}
         for uri in new_uris:
             ancestors = acl_ancestors(uri)
@@ -374,22 +379,24 @@ class AclManager:
         materialized: list[dict[str, Any]] = []
         for record in records:
             record = dict(record)
-            creator_direct = record.pop(ACL_CREATOR_DIRECT_FIELD, None)
+            raw_creator_grant = record.pop(ACL_CREATOR_GRANT_FIELD, None)
+            creator_grant = (
+                CreatorAclGrant(raw_creator_grant) if raw_creator_grant is not None else None
+            )
             source_uri = str(record.get("uri") or "")
-            canonical = canonical_by_uri.get(source_uri)
-            if not canonical:
+            if source_uri not in resource_uris:
                 materialized.append(record)
                 continue
-            effective = existing_acl.get(canonical)
+            effective = existing_acl.get(source_uri)
             if effective is None:
-                parent = parents[canonical]
+                parent = parents[source_uri]
                 inherited = parent_acl[parent].permissions if parent else DirectAcl()
                 direct = DirectAcl()
                 creator = (record.get("user") or {}).get("user_id")
                 protect_created = bool(parent and parent_acl[parent].enabled)
                 if (
                     creator
-                    and creator_direct is not None
+                    and creator_grant is not None
                     and parent
                     and not protect_created
                     and self._auto_protect_new_content is not None
@@ -399,9 +406,9 @@ class AclManager:
                             ctx.account_id
                         )
                     protect_created = auto_protect_new_content
-                if creator and creator_direct is not None and protect_created:
+                if creator and creator_grant is not None and protect_created:
                     creator_acl = entries_to_direct([AclEntry(f"user:{creator}", AclLevel.MANAGER)])
-                    if creator_direct:
+                    if creator_grant == CreatorAclGrant.DIRECT:
                         direct = creator_acl
                     else:
                         inherited = inherited.union(creator_acl)
@@ -412,7 +419,7 @@ class AclManager:
     async def materialize_moved_record(
         self, record: Mapping[str, Any], new_uri: str, ctx: RequestContext
     ) -> dict[str, Any]:
-        if uri_parts(new_uri)[:1] != ["resources"]:
+        if not is_acl_uri(new_uri):
             return EffectiveAcl(False, DirectAcl(), DirectAcl()).context_fields()
         ancestors = acl_ancestors(new_uri)
         parent = ancestors[-2] if len(ancestors) > 1 else None
@@ -420,7 +427,7 @@ class AclManager:
         source_uri = str(record.get("uri") or "")
         direct = (
             DirectAcl.from_context_fields(record, "acl_direct")
-            if uri_parts(source_uri)[:1] == ["resources"]
+            if is_acl_uri(source_uri)
             else DirectAcl()
         )
         return EffectiveAcl(
@@ -451,14 +458,11 @@ class AclManager:
         parent = root_ancestors[-2] if len(root_ancestors) > 1 else None
         base = (await self.resolve(parent, ctx)).permissions if parent else DirectAcl()
         effective_by_uri: dict[str, EffectiveAcl] = {}
+        root_depth = len(root_ancestors)
         for uri in grouped:
             ancestors = acl_ancestors(uri)
-            try:
-                root_index = ancestors.index(root_uri)
-            except ValueError:
-                continue
             inherited = base
-            for ancestor in ancestors[root_index:-1]:
+            for ancestor in ancestors[root_depth - 1 : -1]:
                 inherited = inherited.union(direct_map.get(ancestor, DirectAcl()))
             direct = direct_map.get(uri, DirectAcl())
             effective_by_uri[uri] = EffectiveAcl(
@@ -472,7 +476,7 @@ class AclManager:
             for record in records
             if str(record.get("uri") or "") in effective_by_uri
         ]
-        ids = await self._context_store.upsert_many(updated, ctx=ctx, _acl_materialized=True)
+        ids = await self._context_store._upsert_many_raw(updated, ctx=ctx)
         if len(ids) != len(updated):
             raise RuntimeError(f"Failed to update {len(updated) - len(ids)} context ACL record(s)")
         return effective_by_uri[root_uri]
@@ -498,7 +502,7 @@ class AclManager:
             )
         except Exception:
             if old_records:
-                await self._context_store.upsert_many(old_records, ctx=ctx, _acl_materialized=True)
+                await self._context_store._upsert_many_raw(old_records, ctx=ctx)
             raise
         return effective
 
@@ -515,6 +519,3 @@ class AclManager:
                 entry.to_dict() for entry in direct_to_entries(effective.permissions)
             ],
         }
-
-    async def report(self, uri: str, ctx: RequestContext) -> dict[str, Any]:
-        return self.to_report(uri, await self.resolve(uri, ctx))

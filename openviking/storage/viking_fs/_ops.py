@@ -6,7 +6,9 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from openviking.core.namespace import may_include_hidden_actor_peers, uri_parts
+from openviking.core.namespace import (
+    may_include_hidden_actor_peers,
+)
 from openviking.pyagfs.exceptions import (
     AGFSClientError,
     AGFSDirectoryNotEmptyError,
@@ -14,7 +16,7 @@ from openviking.pyagfs.exceptions import (
 )
 from openviking.server.error_mapping import is_not_found_error, map_exception
 from openviking.server.identity import RequestContext
-from openviking.storage.acl import AclAction
+from openviking.storage.acl import AclAction, is_acl_uri
 from openviking.storage.expr import PathScope
 from openviking.storage.internal_names import STORAGE_INTERNAL_ENTRY_NAMES
 from openviking.storage.viking_fs._base import (
@@ -195,7 +197,7 @@ class _OpsMixin:
                     path,
                     recursive,
                     ctx=ctx,
-                    strict=is_dir and getattr(self, "acl_manager", None) is not None,
+                    strict=is_dir and self.acl_manager is not None,
                 )
                 if is_dir
                 else []
@@ -245,13 +247,13 @@ class _OpsMixin:
         On VectorDB update failure the copy is cleaned up so the source stays intact.
         """
 
-        acl_manager = getattr(self, "acl_manager", None)
+        acl_manager = self.acl_manager
         await self._ensure_access(old_uri, ctx, action=AclAction.MANAGE)
         await self._ensure_access(new_uri, ctx, action=AclAction.WRITE)
         old_path = self._uri_to_path(old_uri, ctx=ctx)
         new_path = self._uri_to_path(new_uri, ctx=ctx)
         target_uri = self._path_to_uri(old_path, ctx=ctx)
-        new_acl_scope = acl_manager is not None and uri_parts(new_uri)[:1] == ["resources"]
+        new_acl_scope = acl_manager is not None and is_acl_uri(new_uri)
 
         # Verify source exists and determine type before locking.
         try:
@@ -677,7 +679,7 @@ class _OpsMixin:
                     entry_path=entry["path"],
                     ctx=ctx,
                 )
-                if getattr(self, "acl_manager", None) is None:
+                if self.acl_manager is None:
                     matches.append(entry_uri)
                     if node_limit is not None and node_limit > 0 and len(matches) >= node_limit:
                         return {"matches": matches, "count": len(matches)}
@@ -685,7 +687,7 @@ class _OpsMixin:
 
                 page_matches.append(entry_uri)
 
-            if getattr(self, "acl_manager", None) is not None:
+            if self.acl_manager is not None:
                 access = await self._can_access_many(page_matches, real_ctx)
                 for entry_uri in page_matches:
                     if not access.get(entry_uri, False):
@@ -823,17 +825,15 @@ class _OpsMixin:
                 )
                 continue
             new_entry = dict(entry.get("extra", {}))
-            new_entry.update(
-                {
-                    "name": info["name"],
-                    "size": info["size"],
-                    "mode": info["mode"],
-                    "modTime": info["modTime"],
-                    "isDir": info["isDir"],
-                    "rel_path": entry["rel_path"],
-                    "uri": entry_uri,
-                }
-            )
+            new_entry.update({
+                "name": info["name"],
+                "size": info["size"],
+                "mode": info["mode"],
+                "modTime": info["modTime"],
+                "isDir": info["isDir"],
+                "rel_path": entry["rel_path"],
+                "uri": entry_uri,
+            })
             result.append(new_entry)
         return result
 
@@ -868,15 +868,13 @@ class _OpsMixin:
                     }
                 )
                 continue
-            result.append(
-                {
-                    "uri": entry_uri,
-                    "size": 0 if is_dir else info["size"],
-                    "isDir": is_dir,
-                    "modTime": format_iso8601(parse_iso_datetime(info["modTime"])),
-                    "rel_path": entry["rel_path"],
-                }
-            )
+            result.append({
+                "uri": entry_uri,
+                "size": 0 if is_dir else info["size"],
+                "isDir": is_dir,
+                "modTime": format_iso8601(parse_iso_datetime(info["modTime"])),
+                "rel_path": entry["rel_path"],
+            })
 
         await self._batch_fetch_abstracts(
             [entry for entry in result if entry.get("access") != "denied"],
@@ -903,12 +901,8 @@ class _OpsMixin:
             try:
                 entries = await self._ls_entries(p, ctx=ctx)
             except Exception as exc:
-                if is_not_found_error(exc):
-                    if strict:
-                        raise
+                if is_not_found_error(exc) and not strict:
                     return
-                if strict:
-                    raise
                 raise
 
             for entry in entries:
@@ -1382,8 +1376,7 @@ class _OpsMixin:
         entry_items = await self._list_read_path_items(uri, ctx=ctx)
         access = await self._can_access_many([entry_uri for _, entry_uri in entry_items], ctx)
         expose_resource_names = bool(
-            getattr(self, "acl_manager", None) is not None
-            and self._safe_uri_parts(uri)[:1] == ["resources"]
+            self.acl_manager is not None and is_acl_uri(uri)
         )
 
         browsable = []

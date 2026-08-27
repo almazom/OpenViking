@@ -27,11 +27,7 @@ class _FakeVikingFS:
 def _make_processor(monkeypatch, *, existing=()):
     processor = ResourceProcessor.__new__(ResourceProcessor)
     viking_fs = _FakeVikingFS(existing)
-    monkeypatch.setattr(
-        resource_processor_module,
-        "get_viking_fs",
-        lambda: viking_fs,
-    )
+    monkeypatch.setattr(resource_processor_module, "get_viking_fs", lambda: viking_fs)
     return processor
 
 

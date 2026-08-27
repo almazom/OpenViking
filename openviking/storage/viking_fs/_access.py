@@ -26,6 +26,7 @@ from openviking.storage.acl import (
     acl_allows,
     acl_ancestors,
     direct_to_entries,
+    is_acl_uri,
     is_implicit_manager,
     normalize_acl_level,
     normalize_acl_principal,
@@ -33,7 +34,6 @@ from openviking.storage.acl import (
 from openviking.storage.internal_names import STORAGE_INTERNAL_ENTRY_NAMES
 from openviking_cli.exceptions import (
     FailedPreconditionError,
-    InvalidArgumentError,
     NotFoundError,
     PermissionDeniedError,
 )
@@ -157,18 +157,9 @@ class _AccessMixin:
         digest = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
         return f"{mount_prefix}{temp_root}/{digest}.encrypt"
 
-    async def _can_access(
-        self,
-        uri: str,
-        ctx: Optional[RequestContext],
-        *,
-        action: AclAction = AclAction.READ,
-    ) -> bool:
-        return (await self._can_access_many([uri], ctx, action=action)).get(uri, False)
-
     async def _can_access_many(
         self,
-        uris: List[str],
+        uris: Sequence[str],
         ctx: Optional[RequestContext],
         *,
         action: AclAction = AclAction.READ,
@@ -176,48 +167,38 @@ class _AccessMixin:
         if not isinstance(action, AclAction):
             raise TypeError(f"action must be AclAction, got {type(action).__name__}")
         real_ctx = self._ctx_or_default(ctx)
-        normalized: Dict[str, Optional[str]] = {}
-        for uri in uris:
+        result: Dict[str, bool] = {}
+        valid: List[str] = []
+        for uri in dict.fromkeys(uris):
             try:
                 self._safe_uri_parts(uri)
-                normalized[uri] = uri
             except ValueError:
-                normalized[uri] = None
+                result[uri] = False
+            else:
+                valid.append(uri)
 
-        acl_manager = getattr(self, "acl_manager", None)
+        acl_manager = self.acl_manager
         if acl_manager is None:
-            return {
-                uri: normalized_uri is not None and self._is_accessible(normalized_uri, real_ctx)
-                for uri, normalized_uri in normalized.items()
-            }
+            result.update({uri: self._is_accessible(uri, real_ctx) for uri in valid})
+            return result
 
-        result: Dict[str, bool] = {}
-        pending: Dict[str, str] = {}
-        for original, normalized_uri in normalized.items():
-            if normalized_uri is None:
-                result[original] = False
+        pending: List[str] = []
+        for uri in valid:
+            if not is_acl_uri(uri):
+                result[uri] = self._is_accessible(uri, real_ctx)
                 continue
-            try:
-                acl_ancestors(normalized_uri)
-            except InvalidArgumentError:
-                result[original] = self._is_accessible(normalized_uri, real_ctx)
-                continue
-            if is_hidden_by_actor_peer_view(normalized_uri, real_ctx):
-                result[original] = False
-            elif is_watch_task_control_uri(normalized_uri):
-                result[original] = real_ctx.role == Role.ROOT
-            elif is_implicit_manager(real_ctx, normalized_uri):
-                result[original] = True
+            if real_ctx.bypass_acl or is_implicit_manager(real_ctx, uri):
+                result[uri] = True
             else:
-                pending[original] = normalized_uri
+                pending.append(uri)
 
-        effective = await acl_manager.resolve_many(pending.values(), real_ctx) if pending else {}
-        for original, normalized_uri in pending.items():
-            acl = effective[normalized_uri]
+        effective = await acl_manager.resolve_many(pending, real_ctx) if pending else {}
+        for uri in pending:
+            acl = effective[uri]
             if not acl.enabled:
-                result[original] = self._is_accessible(normalized_uri, real_ctx)
+                result[uri] = self._is_accessible(uri, real_ctx)
             else:
-                result[original] = acl_allows(acl, real_ctx, action)
+                result[uri] = acl_allows(acl, real_ctx, action)
         return result
 
     async def _ensure_access(
@@ -229,15 +210,9 @@ class _AccessMixin:
     ) -> None:
         await self._ensure_access_many([uri], ctx, action=action)
 
-    async def _ensure_mutable_access(self, uri: str, ctx: Optional[RequestContext]) -> None:
-        await self._ensure_access(uri, ctx, action=AclAction.WRITE)
-
-    async def _ensure_delete_access(self, uri: str, ctx: Optional[RequestContext]) -> None:
-        await self._ensure_access(uri, ctx, action=AclAction.MANAGE)
-
     async def _ensure_access_many(
         self,
-        uris: List[str],
+        uris: Sequence[str],
         ctx: Optional[RequestContext],
         *,
         action: AclAction,
@@ -254,19 +229,18 @@ class _AccessMixin:
         self._ensure_user_not_deleting(real_ctx)
         for uri in uris:
             self._safe_uri_parts(uri)
-            normalized_uri = uri
-            if normalized_uri == "viking://" and real_ctx.role == Role.USER:
+            if uri == "viking://" and real_ctx.role == Role.USER:
                 raise PermissionDeniedError(
                     "Writing the account root requires an administrator",
-                    resource=normalized_uri,
+                    resource=uri,
                 )
-            if is_hidden_by_actor_peer_view(normalized_uri, real_ctx) or may_include_hidden_actor_peers(
-                normalized_uri, real_ctx
+            if is_hidden_by_actor_peer_view(uri, real_ctx) or may_include_hidden_actor_peers(
+                uri, real_ctx
             ):
-                raise PermissionDeniedError(f"Access denied for {uri}", resource=normalized_uri)
+                raise PermissionDeniedError(f"Access denied for {uri}", resource=uri)
             if action is AclAction.MANAGE:
-                self._ensure_supported_delete_namespace(normalized_uri)
-                canonical_parts = self._safe_uri_parts(normalized_uri)
+                self._ensure_supported_delete_namespace(uri)
+                canonical_parts = self._safe_uri_parts(uri)
                 if real_ctx.role != Role.ROOT and (
                     canonical_parts == ["resources"]
                     or (canonical_parts[:1] == ["user"] and len(canonical_parts) == 2)
@@ -274,73 +248,51 @@ class _AccessMixin:
                     raise PermissionDeniedError(
                         "Deleting a namespace root requires root access; use a concrete content "
                         "path instead.",
-                        resource=normalized_uri,
+                        resource=uri,
                     )
-            self._ensure_supported_write_namespace(normalized_uri)
-            if real_ctx.role != Role.ROOT and normalized_uri.rstrip("/") == "viking://temp":
+            self._ensure_supported_write_namespace(uri)
+            if real_ctx.role != Role.ROOT and uri.rstrip("/") == "viking://temp":
                 raise PermissionDeniedError(
                     "Temp root is read-only for non-root users",
-                    resource=normalized_uri,
+                    resource=uri,
                 )
 
     async def _ensure_retrieval_scope(
         self, uri: str, ctx: Optional[RequestContext]
     ) -> None:
-        real_ctx = self._ctx_or_default(ctx)
         self._safe_uri_parts(uri)
-        normalized_uri = uri
-        if getattr(self, "acl_manager", None) is not None:
-            try:
-                acl_ancestors(normalized_uri)
-                return
-            except InvalidArgumentError:
-                pass
-        await self._ensure_access(normalized_uri, real_ctx)
+        if self.acl_manager is not None and is_acl_uri(uri):
+            return
+        await self._ensure_access(uri, ctx)
 
     async def _ensure_acl_manage(
         self, uri: str, ctx: Optional[RequestContext]
-    ) -> tuple[str, RequestContext]:
+    ) -> RequestContext:
         if self.acl_manager is None:
             raise RuntimeError("ACL is not initialized")
         real_ctx = self._ctx_or_default(ctx)
         self._safe_uri_parts(uri)
-        normalized_uri = uri
-        acl_ancestors(normalized_uri)
-        if is_implicit_manager(real_ctx, normalized_uri):
-            return normalized_uri, real_ctx
-        effective = await self.acl_manager.resolve(normalized_uri, real_ctx)
+        acl_ancestors(uri)
+        if is_implicit_manager(real_ctx, uri):
+            return real_ctx
+        effective = await self.acl_manager.resolve(uri, real_ctx)
         if effective.enabled and acl_allows(effective, real_ctx, AclAction.MANAGE):
-            return normalized_uri, real_ctx
-        raise PermissionDeniedError(f"ACL management denied for {uri}", resource=normalized_uri)
+            return real_ctx
+        raise PermissionDeniedError(f"ACL management denied for {uri}", resource=uri)
 
-    async def _acl_target_stat(self, uri: str, ctx: RequestContext) -> Dict[str, Any]:
+    async def _ensure_acl_target_exists(self, uri: str, ctx: RequestContext) -> None:
         try:
-            return await self._async_agfs.stat(self._uri_to_path(uri, ctx=ctx))
+            await self._async_agfs.stat(self._uri_to_path(uri, ctx=ctx))
         except Exception as exc:
             if is_not_found_error(exc):
                 raise NotFoundError(uri, "resource") from exc
             raise
 
     async def get_acl(self, uri: str, ctx: Optional[RequestContext] = None) -> Dict[str, Any]:
-        normalized_uri, real_ctx = await self._ensure_acl_manage(uri, ctx)
-        await self._acl_target_stat(normalized_uri, real_ctx)
-        return await self.acl_manager.report(normalized_uri, real_ctx)
-
-    async def _set_acl_locked(
-        self,
-        uri: str,
-        entries: Sequence[AclEntry | Mapping[str, Any]],
-        ctx: RequestContext,
-    ) -> Dict[str, Any]:
-        path = self._uri_to_path(uri, ctx=ctx)
-        lease = await self._async_agfs.pathlock_acquire_tree(path)
-        try:
-            await self._ensure_acl_manage(uri, ctx)
-            await self._acl_target_stat(uri, ctx)
-            effective = await self.acl_manager.set_direct(uri, entries, ctx)
-            return self.acl_manager.to_report(uri, effective)
-        finally:
-            await self._async_agfs.pathlock_release(lease)
+        real_ctx = await self._ensure_acl_manage(uri, ctx)
+        await self._ensure_acl_target_exists(uri, real_ctx)
+        effective = await self.acl_manager.resolve(uri, real_ctx)
+        return self.acl_manager.to_report(uri, effective)
 
     async def set_acl(
         self,
@@ -348,8 +300,16 @@ class _AccessMixin:
         entries: Sequence[AclEntry | Mapping[str, Any]],
         ctx: Optional[RequestContext] = None,
     ) -> Dict[str, Any]:
-        normalized_uri, real_ctx = await self._ensure_acl_manage(uri, ctx)
-        return await self._set_acl_locked(normalized_uri, entries, real_ctx)
+        real_ctx = await self._ensure_acl_manage(uri, ctx)
+        path = self._uri_to_path(uri, ctx=real_ctx)
+        lease = await self._async_agfs.pathlock_acquire_tree(path)
+        try:
+            await self._ensure_acl_manage(uri, real_ctx)
+            await self._ensure_acl_target_exists(uri, real_ctx)
+            effective = await self.acl_manager.set_direct(uri, entries, real_ctx)
+            return self.acl_manager.to_report(uri, effective)
+        finally:
+            await self._async_agfs.pathlock_release(lease)
 
     async def grant_acl(
         self,
@@ -377,27 +337,20 @@ class _AccessMixin:
     ) -> Dict[str, Any]:
         principal = normalize_acl_principal(principal)
         normalized_level = normalize_acl_level(level) if level is not None else None
-        normalized_uri, real_ctx = await self._ensure_acl_manage(uri, ctx)
-        path = self._uri_to_path(normalized_uri, ctx=real_ctx)
+        real_ctx = await self._ensure_acl_manage(uri, ctx)
+        path = self._uri_to_path(uri, ctx=real_ctx)
         lease = await self._async_agfs.pathlock_acquire_tree(path)
         try:
-            await self._ensure_acl_manage(normalized_uri, real_ctx)
-            await self._acl_target_stat(normalized_uri, real_ctx)
-            direct = await self.acl_manager.get_direct(normalized_uri, real_ctx)
-            entries = {entry.principal: entry.level for entry in direct_to_entries(direct)}
+            await self._ensure_acl_manage(uri, real_ctx)
+            await self._ensure_acl_target_exists(uri, real_ctx)
+            direct = await self.acl_manager.get_direct(uri, real_ctx)
+            entries = {entry.principal: entry for entry in direct_to_entries(direct)}
             if normalized_level is None:
                 entries.pop(principal, None)
             else:
-                entries[principal] = normalized_level
-            effective = await self.acl_manager.set_direct(
-                normalized_uri,
-                [
-                    {"principal": entry_principal, "level": entry_level}
-                    for entry_principal, entry_level in entries.items()
-                ],
-                real_ctx,
-            )
-            return self.acl_manager.to_report(normalized_uri, effective)
+                entries[principal] = AclEntry(principal, normalized_level)
+            effective = await self.acl_manager.set_direct(uri, list(entries.values()), real_ctx)
+            return self.acl_manager.to_report(uri, effective)
         finally:
             await self._async_agfs.pathlock_release(lease)
 
@@ -524,7 +477,7 @@ class _AccessMixin:
             if not self._is_name_visible_at_path(name, parent_path):
                 return False
 
-        if getattr(self, "acl_manager", None) is None:
+        if self.acl_manager is None:
             uri = self._path_to_uri(entry_path, ctx=ctx)
             if not self._is_accessible(uri, ctx):
                 return False
@@ -612,17 +565,16 @@ class _AccessMixin:
                 )
                 candidates.append((entry, entry_uri))
                 if (
-                    getattr(self, "acl_manager", None) is None
+                    self.acl_manager is None
                     and node_limit is not None
                     and len(candidates) >= node_limit
                 ):
                     break
 
             expose_resource_names = bool(
-                getattr(self, "acl_manager", None) is not None
-                and self._safe_uri_parts(uri)[:1] == ["resources"]
+                self.acl_manager is not None and is_acl_uri(uri)
             )
-            if getattr(self, "acl_manager", None) is None:
+            if self.acl_manager is None:
                 visible = candidates
             else:
                 access = await self._can_access_many(

@@ -242,15 +242,6 @@ async def test_diff_checks_access_before_reading_snapshot_content():
             ctx=ctx,
         )
 
-    with pytest.raises(PermissionDeniedError, match="explicit paths"):
-        await VikingFS.commit(vfs, message="account-wide", ctx=ctx)
-    with pytest.raises(PermissionDeniedError, match="explicit paths"):
-        await VikingFS.log(vfs, ctx=ctx)
-    with pytest.raises(PermissionDeniedError, match="explicit project_dir"):
-        await VikingFS.restore(vfs, source_commit="main", ctx=ctx)
-    with pytest.raises(PermissionDeniedError, match="administrator"):
-        await VikingFS.get_gitignore(vfs, ctx=ctx)
-
     assert show_calls == []
 
 

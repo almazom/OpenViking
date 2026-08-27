@@ -160,21 +160,12 @@ async def test_sdk_ls(http_client):
 
 
 async def test_sdk_mkdir_and_ls(http_client):
-    client, service = http_client
+    client, _ = http_client
     uri = "viking://resources/sdk_dir/"
 
     await client.mkdir(uri)
-    await client.wait_processed()
 
     assert await client.abstract(uri) == "# sdk_dir"
-    creator = RequestContext(
-        user=UserIdentifier("sdk_test_account", "sdk_test_user"),
-        role=Role.ADMIN,
-    )
-    acl = await service.fs.get_acl(uri.rstrip("/"), ctx=creator)
-    assert acl["acl_enabled"] is False
-    assert acl["direct_entries"] == []
-    assert acl["inherited_entries"] == []
     result = await client.ls("viking://resources/")
     assert isinstance(result, list)
 

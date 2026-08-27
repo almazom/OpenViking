@@ -2599,6 +2599,7 @@ fn is_admin_subcommand(token: &str) -> bool {
             | "remove-user"
             | "set-role"
             | "regenerate-key"
+            | "set-account-settings"
     )
 }
 
@@ -4230,6 +4231,7 @@ mod tests {
             &["ov", "admin", "remove-user"],
             &["ov", "admin", "set-role"],
             &["ov", "admin", "regenerate-key"],
+            &["ov", "admin", "set-account-settings"],
             &["ov", "system", "wait"],
             &["ov", "system", "status"],
             &["ov", "system", "health"],

@@ -16,7 +16,7 @@ class _VectorMixin:
 
     async def _delete_from_vector_store(
         self, uris: List[str], ctx: Optional[RequestContext] = None
-    ) -> List[tuple[str, str]]:
+    ) -> None:
         """Delete records with specified URIs from vector store.
 
         Uses tenant-safe URI deletion semantics from vector store.
@@ -40,7 +40,7 @@ class _VectorMixin:
         old_base: str,
         new_base: str,
         ctx: Optional[RequestContext] = None,
-    ) -> None:
+    ) -> List[tuple[str, str]]:
         """Update URIs in vector store (when moving files).
 
         Preserves vector data and updates URI-derived identifiers without regenerating embeddings.

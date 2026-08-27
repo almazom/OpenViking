@@ -185,7 +185,7 @@ class OpenVikingService:
         self._vikingdb_manager = VikingDBManager(
             vectordb_config=config.vectordb, queue_manager=self._queue_manager
         )
-        AclManager(
+        self._vikingdb_manager.acl_manager = AclManager(
             self._vikingdb_manager,
             auto_protect_new_content=self._auto_protect_new_content,
         )
@@ -350,6 +350,7 @@ class OpenVikingService:
         if self._vikingdb_manager is None:
             raise RuntimeError("VikingDBManager not initialized")
         await init_context_collection(self._vikingdb_manager)
+
         if self._agfs_client is None:
             raise RuntimeError("AGFS client not initialized")
         if self._embedder is None:

@@ -300,8 +300,6 @@ async def init_context_collection(storage) -> bool:
             "collection/index/schema must be pre-created out of band"
         )
         return False
-
-    required_acl_fields = ACL_CONTEXT_FIELDS
     schema = CollectionSchemas.context_collection(
         collection_name,
         vector_dim,
@@ -321,9 +319,9 @@ async def init_context_collection(storage) -> bool:
         )
 
     existing_fields = {field.get("FieldName") for field in existing_meta.get("Fields", [])}
-    missing_acl_fields = sorted(required_acl_fields - existing_fields)
+    missing_acl_fields = sorted(ACL_CONTEXT_FIELDS - existing_fields)
     existing_scalar_indexes = set(existing_meta.get("ScalarIndex", []))
-    missing_acl_indexes = sorted(required_acl_fields - existing_scalar_indexes)
+    missing_acl_indexes = sorted(ACL_CONTEXT_FIELDS - existing_scalar_indexes)
 
     async def _migrate_acl_schema() -> None:
         if not missing_acl_fields and not missing_acl_indexes:
@@ -625,8 +623,14 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             embedding_msg = EmbeddingMsg.from_json(data["data"])
             inserted_data = embedding_msg.context_data
             account_id = inserted_data.get("account_id", "default")
-            user = UserIdentifier(account_id=account_id, user_id="default")
-            ctx = RequestContext(user=user, role=Role.ROOT)
+            context_user = inserted_data.get("user") or {}
+            user_id = (
+                context_user.get("user_id")
+                or inserted_data.get("owner_user_id")
+                or "default"
+            )
+            user = UserIdentifier(account_id=account_id, user_id=user_id)
+            ctx = RequestContext(user=user, role=Role.USER, bypass_acl=True)
             collector = resolve_telemetry(embedding_msg.telemetry_id)
             telemetry_ctx = bind_telemetry(collector) if collector is not None else nullcontext()
 
