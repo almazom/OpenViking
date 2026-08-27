@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from openviking.core.identifiers import validate_identifier_part, validate_user_id
 from openviking.core.namespace import uri_parts
@@ -212,8 +212,13 @@ def acl_allows(acl: EffectiveAcl, ctx: RequestContext, action: AclAction) -> boo
 class AclManager:
     """Stores direct and inherited ACL fields in the context collection."""
 
-    def __init__(self, context_store: "VikingVectorIndexBackend") -> None:
+    def __init__(
+        self,
+        context_store: "VikingVectorIndexBackend",
+        auto_protect_new_content: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> None:
         self._context_store = context_store
+        self._auto_protect_new_content = auto_protect_new_content
         context_store.acl_manager = self
 
     @staticmethod
@@ -364,6 +369,7 @@ class AclManager:
             parents[uri] = ancestors[-2] if len(ancestors) > 1 else None
 
         parent_acl = await self.resolve_many([parent for parent in parents.values() if parent], ctx)
+        auto_protect_new_content: bool | None = None
 
         materialized: list[dict[str, Any]] = []
         for record in records:
@@ -380,7 +386,20 @@ class AclManager:
                 inherited = parent_acl[parent].permissions if parent else DirectAcl()
                 direct = DirectAcl()
                 creator = (record.get("user") or {}).get("user_id")
-                if creator and creator_direct is not None and parent and parent_acl[parent].enabled:
+                protect_created = bool(parent and parent_acl[parent].enabled)
+                if (
+                    creator
+                    and creator_direct is not None
+                    and parent
+                    and not protect_created
+                    and self._auto_protect_new_content is not None
+                ):
+                    if auto_protect_new_content is None:
+                        auto_protect_new_content = await self._auto_protect_new_content(
+                            ctx.account_id
+                        )
+                    protect_created = auto_protect_new_content
+                if creator and creator_direct is not None and protect_created:
                     creator_acl = entries_to_direct([AclEntry(f"user:{creator}", AclLevel.MANAGER)])
                     if creator_direct:
                         direct = creator_acl

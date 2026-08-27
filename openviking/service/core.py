@@ -14,6 +14,10 @@ from openviking.core.directories import DirectoryInitializer
 from openviking.privacy import UserPrivacyConfigService
 from openviking.resource.uri_mutation_coordinator import UriMutationCoordinator
 from openviking.resource.watch_scheduler import WatchScheduler
+from openviking.server.account_settings import (
+    effective_auto_protect_new_content,
+    read_account_settings,
+)
 from openviking.server.identity import RequestContext, Role
 from openviking.service.agent_evolution_service import AgentEvolutionService
 from openviking.service.debug_service import DebugService
@@ -181,7 +185,10 @@ class OpenVikingService:
         self._vikingdb_manager = VikingDBManager(
             vectordb_config=config.vectordb, queue_manager=self._queue_manager
         )
-        AclManager(self._vikingdb_manager)
+        AclManager(
+            self._vikingdb_manager,
+            auto_protect_new_content=self._auto_protect_new_content,
+        )
 
         # Configure queues if QueueManager is available.
         # Workers are NOT started here — start() is called after VikingFS is initialized
@@ -196,6 +203,12 @@ class OpenVikingService:
         """Build the single runtime binding config from OpenViking storage + encryption settings."""
         binding_config, self._encryptor = build_runtime_ragfs_binding_config(self._config)
         return binding_config
+
+    async def _auto_protect_new_content(self, account_id: str) -> bool:
+        if self._viking_fs is None:
+            raise NotInitializedError("VikingFS")
+        settings = await read_account_settings(self._viking_fs, account_id)
+        return effective_auto_protect_new_content(settings)
 
     def _ensure_data_dir_lock_acquired(self) -> None:
         """Acquire the process-level data directory lock once for this service instance."""

@@ -130,16 +130,25 @@ Content-Type: application/json
 ### account_settings
 
 ROOT can manage any account and ADMIN can manage only its own account. The
-generic settings endpoint accepts only explicitly allowlisted fields; currently
-only `agent_evolution.enabled` is writable.
+generic settings endpoint accepts only explicitly allowlisted fields. It currently
+allows `agent_evolution.enabled` and `resource_acl.auto_protect_new_content`.
 
 ```http
 GET /api/v1/admin/accounts/{account_id}/settings
 PATCH /api/v1/admin/accounts/{account_id}/settings
 Content-Type: application/json
 
-{"agent_evolution": {"enabled": true}}
+{
+  "agent_evolution": {"enabled": true},
+  "resource_acl": {"auto_protect_new_content": true}
+}
 ```
+
+`resource_acl.auto_protect_new_content` defaults to `false`. When enabled, newly
+created shared files, directories, and `add-resource` roots grant their creator
+direct `manager` while inheriting the parent ACL. Existing content is not migrated
+or modified. Disabling it again affects only later creations; existing ACLs remain
+effective.
 
 Before an existing setting is replaced, it is backed up to
 `/local/{account_id}/_system/setting.backup.json`.

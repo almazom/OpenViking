@@ -129,15 +129,23 @@ Content-Type: application/json
 ### account_settings
 
 ROOT 可管理任意 account，ADMIN 仅可管理自己所属的 account。通用配置接口仅允许
-显式列入白名单的字段；当前只允许修改 `agent_evolution.enabled`。
+显式列入白名单的字段；当前允许修改 `agent_evolution.enabled` 和
+`resource_acl.auto_protect_new_content`。
 
 ```http
 GET /api/v1/admin/accounts/{account_id}/settings
 PATCH /api/v1/admin/accounts/{account_id}/settings
 Content-Type: application/json
 
-{"agent_evolution": {"enabled": true}}
+{
+  "agent_evolution": {"enabled": true},
+  "resource_acl": {"auto_protect_new_content": true}
+}
 ```
+
+`resource_acl.auto_protect_new_content` 默认为 `false`。开启后，账号内新建的共享
+文件、目录和 `add-resource` 根节点会给创建者直接 `manager`，同时继承父目录
+ACL；已有内容不会迁移或改权。重新关闭只影响后续创建，已有 ACL 继续生效。
 
 覆盖已有配置前，内核会先备份到
 `/local/{account_id}/_system/setting.backup.json`。

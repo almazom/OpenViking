@@ -8,6 +8,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.server.account_settings import (
+    AccountResourceAclSettings,
+    AccountSettingsPatch,
+    update_account_settings,
+)
 from openviking.server.identity import RequestContext, Role
 from openviking.session.memory.dataclass import MemoryFile
 from openviking.session.memory.utils import MemoryFileUtils
@@ -124,11 +129,30 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(
         role=Role.USER,
     )
     parent_uri = "viking://resources/append_plain"
+    auto_protected_dir = "viking://resources/auto_protected"
     created_dir = f"{parent_uri}/creator_dir"
     uri = "viking://resources/append_plain/journal.md"
     delete_root = "viking://resources/recursive_delete"
     protected_dir = f"{delete_root}/protected"
     protected_file = f"{protected_dir}/notes.md"
+
+    await update_account_settings(
+        service.viking_fs,
+        creator.account_id,
+        AccountSettingsPatch(
+            resource_acl=AccountResourceAclSettings(auto_protect_new_content=True)
+        ),
+    )
+    await service.fs.mkdir(auto_protected_dir, ctx=creator)
+    await service.resources.wait_processed()
+    auto_protected_acl = await service.fs.get_acl(auto_protected_dir, ctx=creator)
+    assert auto_protected_acl["direct_entries"] == [
+        {
+            "principal": f"user:{creator.user.user_id}",
+            "level": "manager",
+        }
+    ]
+    assert auto_protected_acl["inherited_entries"] == []
 
     await service.viking_fs.mkdir(parent_uri, ctx=admin)
     assert await service.vikingdb_manager.upsert(
@@ -153,6 +177,7 @@ async def test_shared_resource_acl_protects_content_and_recursive_delete(
 
     await service.fs.mkdir(created_dir, ctx=creator)
     await service.fs.write(uri, content="line1\n", ctx=creator, mode="create", wait=True)
+    await service.resources.wait_processed()
     creator_entry = {
         "principal": f"user:{creator.user.user_id}",
         "level": "manager",

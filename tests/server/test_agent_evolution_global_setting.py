@@ -12,6 +12,7 @@ import pytest_asyncio
 from openviking.pyagfs import AGFSNotFoundError
 from openviking.server.account_settings import (
     AccountAgentEvolutionSettings,
+    AccountResourceAclSettings,
     AccountSettingsPatch,
     account_settings_backup_path,
     account_settings_path,
@@ -19,14 +20,17 @@ from openviking.server.account_settings import (
     update_account_settings,
 )
 from openviking.server.agent_evolution_config import AgentEvolutionConfigProvider
+from openviking.server.api_keys import APIKeyManager
 from openviking.server.app import create_app
-from openviking.server.auth.plugins import DevAuthPlugin
+from openviking.server.auth.plugins import ApiKeyAuthPlugin
 from openviking.server.config import AgentEvolutionConfig, ServerConfig, UserConfig
 from openviking.server.dependencies import set_service
 from openviking.server.identity import RequestContext, Role
 from openviking.service.session_service import SessionService
 from openviking.session import Session
 from openviking_cli.session.user_id import UserIdentifier
+
+ROOT_KEY = "test-root-key-for-account-settings"
 
 
 class _FakeAGFS:
@@ -79,11 +83,18 @@ async def settings_http(fake_viking_fs, monkeypatch):
     )
     sessions = SessionService(viking_fs=fake_viking_fs)
     service = SimpleNamespace(sessions=sessions, viking_fs=fake_viking_fs)
-    app = create_app(config=ServerConfig(), service=service)
+    app = create_app(config=ServerConfig(root_api_key=ROOT_KEY), service=service)
     set_service(service)
-    app.state.auth_plugin = DevAuthPlugin()
+    manager = APIKeyManager(root_key=ROOT_KEY, viking_fs=fake_viking_fs)
+    await manager.load()
+    app.state.api_key_manager = manager
+    app.state.auth_plugin = ApiKeyAuthPlugin()
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        headers={"X-API-Key": ROOT_KEY},
+    ) as client:
         yield client, service
 
 
@@ -187,8 +198,22 @@ async def test_account_overrides_are_isolated(fake_viking_fs):
 
 
 async def test_account_settings_update_backs_up_previous_file(fake_viking_fs):
-    await update_account_settings(fake_viking_fs, "default", _patch(False))
-    await update_account_settings(fake_viking_fs, "default", _patch(True))
+    await update_account_settings(
+        fake_viking_fs,
+        "default",
+        AccountSettingsPatch(
+            agent_evolution=AccountAgentEvolutionSettings(enabled=False),
+            resource_acl=AccountResourceAclSettings(auto_protect_new_content=False),
+        ),
+    )
+    await update_account_settings(
+        fake_viking_fs,
+        "default",
+        AccountSettingsPatch(
+            agent_evolution=AccountAgentEvolutionSettings(enabled=True),
+            resource_acl=AccountResourceAclSettings(auto_protect_new_content=True),
+        ),
+    )
 
     current = fake_viking_fs.agfs.files[account_settings_path("default")]
     backup = fake_viking_fs.agfs.files[account_settings_backup_path("default")]
@@ -197,6 +222,8 @@ async def test_account_settings_update_backs_up_previous_file(fake_viking_fs):
 
     assert current_payload["agent_evolution"]["enabled"] is True
     assert backup_payload["agent_evolution"]["enabled"] is False
+    assert current_payload["resource_acl"]["auto_protect_new_content"] is True
+    assert backup_payload["resource_acl"]["auto_protect_new_content"] is False
 
 
 async def test_account_settings_admin_api_reads_and_updates_effective_value(
@@ -209,18 +236,32 @@ async def test_account_settings_admin_api_reads_and_updates_effective_value(
     assert initial.status_code == 200, initial.text
     assert initial.json()["result"] == {
         "account_id": "default",
-        "settings": {"agent_evolution": {"enabled": False}},
+        "settings": {
+            "agent_evolution": {"enabled": False},
+            "resource_acl": {"auto_protect_new_content": False},
+        },
         "overrides": {},
     }
 
     updated = await client.patch(
         "/api/v1/admin/accounts/default/settings",
-        json={"agent_evolution": {"enabled": True}},
+        json={
+            "agent_evolution": {"enabled": True},
+            "resource_acl": {"auto_protect_new_content": True},
+        },
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["result"]["settings"]["agent_evolution"]["enabled"] is True
-    assert updated.json()["result"]["overrides"] == {"agent_evolution": {"enabled": True}}
-    assert (await read_account_settings(service.viking_fs, "default")).agent_evolution.enabled
+    assert updated.json()["result"]["settings"]["resource_acl"] == {
+        "auto_protect_new_content": True
+    }
+    assert updated.json()["result"]["overrides"] == {
+        "agent_evolution": {"enabled": True},
+        "resource_acl": {"auto_protect_new_content": True},
+    }
+    settings = await read_account_settings(service.viking_fs, "default")
+    assert settings.agent_evolution.enabled
+    assert settings.resource_acl == AccountResourceAclSettings(auto_protect_new_content=True)
 
 
 async def test_account_settings_admin_api_rejects_non_allowlisted_fields(

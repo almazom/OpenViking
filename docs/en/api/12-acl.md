@@ -16,7 +16,14 @@ Read [Resource Access Control (ACL)](../concepts/15-acl.md) for the permission a
 
 Every endpoint requires `manage` on the target node. Account `ADMIN`s implicitly manage shared resources.
 
-`viking://resources` is a fixed shared scope and cannot carry a direct ACL. New content under a parent without ACLs keeps the legacy shared behavior; an account `ADMIN` must explicitly establish the first ACL. Under an ACL-controlled parent, a new file or directory inherits the parent permissions and grants its creator direct `manager`. `add-resource` writes that direct creator grant only on the generated import root; descendants inherit it.
+`viking://resources` is a fixed shared scope and cannot carry a direct ACL. The
+account setting `resource_acl.auto_protect_new_content` defaults to `false`: new
+content under a parent without ACLs keeps the legacy shared behavior, while a new
+file or directory under an ACL-controlled parent inherits the parent permissions
+and grants its creator direct `manager`. When the setting is enabled, newly created
+shared files, directories, and `add-resource` roots grant the creator direct
+`manager` even under an ACL-free parent; existing content remains unchanged.
+Descendants within an `add-resource` import only inherit that grant.
 
 ## Data Structures
 
