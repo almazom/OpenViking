@@ -254,6 +254,22 @@ pub async fn regenerate_key(
     Ok(())
 }
 
+pub async fn set_account_settings(
+    client: &HttpClient,
+    account_id: &str,
+    auto_protect_new_content: bool,
+    output_format: OutputFormat,
+    compact: bool,
+) -> Result<()> {
+    show_admin(
+        client
+            .admin_set_account_auto_protect_new_content(account_id, auto_protect_new_content)
+            .await?,
+        output_format,
+        compact,
+    )
+}
+
 fn print_admin_user_key_notice(
     response: &Value,
     output_format: OutputFormat,

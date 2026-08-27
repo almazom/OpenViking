@@ -781,6 +781,19 @@ pub async fn handle_admin(cmd: AdminCommands, ctx: CliContext) -> Result<()> {
             )
             .await
         }
+        AdminCommands::SetAccountSettings {
+            account_id,
+            auto_protect_new_content,
+        } => {
+            commands::admin::set_account_settings(
+                &client,
+                &account_id,
+                auto_protect_new_content,
+                ctx.output_format,
+                ctx.compact,
+            )
+            .await
+        }
     }
 }
 

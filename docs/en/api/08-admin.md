@@ -150,6 +150,10 @@ direct `manager` while inheriting the parent ACL. Existing content is not migrat
 or modified. Disabling it again affects only later creations; existing ACLs remain
 effective.
 
+```bash
+ov --sudo admin set-account-settings acme --auto-protect-new-content true
+```
+
 Before an existing setting is replaced, it is backed up to
 `/local/{account_id}/_system/setting.backup.json`.
 

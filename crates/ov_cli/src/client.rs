@@ -1463,6 +1463,24 @@ impl HttpClient {
         self.delete(&path, &[]).await
     }
 
+    pub async fn admin_set_account_auto_protect_new_content(
+        &self,
+        account_id: &str,
+        enabled: bool,
+    ) -> Result<Value> {
+        let path = format!("/api/v1/admin/accounts/{}/settings", account_id);
+        self.patch(
+            &path,
+            &serde_json::json!({
+                "resource_acl": {
+                    "auto_protect_new_content": enabled,
+                }
+            }),
+            &[],
+        )
+        .await
+    }
+
     pub async fn admin_register_user(
         &self,
         account_id: &str,
@@ -2417,7 +2435,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_seed_payloads_are_sent() {
+    async fn admin_request_payloads_are_sent() {
         let (base_url, request_rx) = spawn_request_capture_server().await;
         let client = HttpClient::new(base_url, None, None, None, None, 5.0, false, None);
         client
@@ -2447,6 +2465,16 @@ mod tests {
         let request = request_rx.await.expect("request should be captured");
         assert!(request.starts_with("POST /api/v1/admin/accounts/acct/users/alice/key "));
         assert!(request.contains(r#""seed":"new-seed""#));
+
+        let (base_url, request_rx) = spawn_request_capture_server().await;
+        let client = HttpClient::new(base_url, None, None, None, None, 5.0, false, None);
+        client
+            .admin_set_account_auto_protect_new_content("acct", true)
+            .await
+            .expect("set account settings should succeed");
+        let request = request_rx.await.expect("request should be captured");
+        assert!(request.starts_with("PATCH /api/v1/admin/accounts/acct/settings "));
+        assert!(request.contains(r#""resource_acl":{"auto_protect_new_content":true}"#));
     }
 
     #[test]

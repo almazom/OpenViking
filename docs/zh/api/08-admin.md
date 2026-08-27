@@ -147,6 +147,10 @@ Content-Type: application/json
 文件、目录和 `add-resource` 根节点会给创建者直接 `manager`，同时继承父目录
 ACL；已有内容不会迁移或改权。重新关闭只影响后续创建，已有 ACL 继续生效。
 
+```bash
+ov --sudo admin set-account-settings acme --auto-protect-new-content true
+```
+
 覆盖已有配置前，内核会先备份到
 `/local/{account_id}/_system/setting.backup.json`。
 

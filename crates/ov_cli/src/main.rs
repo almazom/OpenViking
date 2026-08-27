@@ -1987,6 +1987,20 @@ enum AdminCommands {
         #[arg(long, value_name = "seed")]
         seed: Option<String>,
     },
+    /// Update allowlisted settings for an account
+    SetAccountSettings {
+        /// Account ID
+        #[arg(value_name = "account-id")]
+        account_id: String,
+        /// Automatically protect newly created shared content
+        #[arg(
+            long,
+            required = true,
+            action = ArgAction::Set,
+            value_name = "true|false"
+        )]
+        auto_protect_new_content: bool,
+    },
 }
 
 impl Commands {
