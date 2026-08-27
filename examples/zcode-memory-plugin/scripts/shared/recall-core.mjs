@@ -344,7 +344,7 @@ async function buildFallbackInjectionBlock(fetchJSON, items, cfg, actorPeerId = 
   const lines = [
     "<openviking-context>",
     `✧ OV · recall ×${items.length}`,
-    "Relevant context from OpenViking. Use the read MCP tool to expand URIs.",
+    "When a recalled item is used in your reply, cite it inline with glyphs: ✧ recall · ⌕ search · ▤ read (omit if none used).",
   ];
   let contentCount = 0;
   let hintCount = 0;
@@ -429,7 +429,7 @@ function wrapContext(body) {
   return [
     "<openviking-context>",
     "✧ OV · recall ×" + n,
-    "Relevant memory from OpenViking. Use the search/read MCP tools to expand URIs.",
+    "When a recalled item is used in your reply, cite it inline with glyphs: ✧ recall · ⌕ search · ▤ read, e.g. ✧ name — viking://...(omit if none used).",
     body,
     "</openviking-context>",
   ].join("\n");
