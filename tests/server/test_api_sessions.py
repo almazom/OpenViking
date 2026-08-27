@@ -21,7 +21,10 @@ from openviking.server.config import (
 from openviking.server.dependencies import set_service
 from openviking.server.identity import RequestContext, Role
 from openviking.server.routers import sessions as sessions_router
+from openviking.server.routers import task_queues as task_queues_router
+from openviking.service.open_task_queue import OpenTaskQueueService
 from openviking.session.session import Session
+from openviking_cli.exceptions import ConflictError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import OPENVIKING_CONFIG_ENV
 from openviking_cli.utils.config.memory_config import SessionAutoCommitConfig
@@ -48,6 +51,68 @@ def _message_request(
     if peer_id is not _UNSET and peer_id is not None:
         payload["peer_id"] = peer_id
     return payload
+
+
+def _compile_open_task_request() -> dict:
+    return {
+        "from": ["viking://resources/project"],
+        "to": "viking://resources/wiki",
+        "skill": "viking://user/default/skills/wiki",
+        "reason": "Generate wiki pages",
+        "runtime_timeout_seconds": 3600,
+    }
+
+
+class _FakeOpenTaskQueue:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.pending: list[dict] = []
+        self.processing: dict[str, dict] = {}
+        self.acked: list[str] = []
+        self._next_id = 0
+
+    async def enqueue(self, data):
+        self._next_id += 1
+        msg_id = f"msg_{self._next_id}"
+        message = {"id": msg_id, "data": json.dumps(dict(data))}
+        self.pending.append(message)
+        return msg_id
+
+    async def dequeue_raw(self):
+        if not self.pending:
+            return None
+        message = self.pending.pop(0)
+        self.processing[message["id"]] = message
+        return message
+
+    async def ack(self, msg_id, message=None):
+        del message
+        self.processing.pop(msg_id, None)
+        self.acked.append(msg_id)
+
+    def recover_processing(self) -> None:
+        messages = list(self.processing.values())
+        self.processing.clear()
+        self.pending.extend(messages)
+
+
+def _install_fake_open_task_queue(monkeypatch, service, *, lease_seconds: float = 600.0):
+    queues: dict[str, _FakeOpenTaskQueue] = {}
+
+    def queue_factory(name: str) -> _FakeOpenTaskQueue:
+        queue = queues.get(name)
+        if queue is None:
+            queue = _FakeOpenTaskQueue(name)
+            queues[name] = queue
+        return queue
+
+    queue_service = OpenTaskQueueService(
+        service.viking_fs.agfs,
+        lease_seconds=lease_seconds,
+        queue_factory=queue_factory,
+    )
+    monkeypatch.setattr(task_queues_router, "_open_task_queue_service", lambda: queue_service)
+    return queue_service, queues
 
 
 @pytest.fixture(autouse=True)
@@ -1481,3 +1546,190 @@ async def test_commit_failed_when_summary_fails_does_not_block_next_commit(
     body = resp.json()
     assert body["status"] == "ok"
     assert body["result"]["archived"] is True
+
+
+async def test_compile_open_task_queue_claim_complete_ack_same_account(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    _queue_service, queues = _install_fake_open_task_queue(monkeypatch, service)
+    alice_headers = {"X-OpenViking-Account": "queue-acct", "X-OpenViking-User": "alice"}
+    other_headers = {"X-OpenViking-Account": "other-acct", "X-OpenViking-User": "eve"}
+
+    create_resp = await client.post(
+        "/api/v1/task-queues/compile/tasks",
+        json=_compile_open_task_request(),
+        headers=alice_headers,
+    )
+
+    assert create_resp.status_code == 200, create_resp.text
+    created = create_resp.json()["result"]
+    task_id = created["task_id"]
+    assert task_id
+    assert created["task_type"] == "compile"
+    assert created["status"] == "pending"
+    assert created["created_by_user_id"] == "alice"
+    assert created["user_id"] == "alice"
+    assert created["payload"]["from"] == ["viking://resources/project"]
+    assert "lease_id" not in created
+    assert "queue_name" not in created
+    assert "queue_message_id" not in created
+    assert service.viking_fs.agfs.exists(f"/local/queue-acct/_system/tasks/alice/{task_id}.json")
+    assert not service.viking_fs.agfs.exists(
+        f"/local/queue-acct/_system/open_task_queue/compile/{task_id}/task.json"
+    )
+    queue = queues["OpenCompileTask"]
+    assert len(queue.pending) == 1
+    assert queue.processing == {}
+
+    forbidden_connection = await client.post(
+        "/api/v1/task-queues/compile/tasks",
+        json={
+            **_compile_open_task_request(),
+            "openviking_connection": {"api_key": "secret"},
+        },
+        headers=alice_headers,
+    )
+    assert forbidden_connection.status_code == 400
+
+    hidden = await client.get(
+        f"/api/v1/task-queues/compile/tasks/{task_id}",
+        headers=other_headers,
+    )
+    assert hidden.status_code == 404
+
+    claim_resp = await client.post(
+        "/api/v1/task-queues/compile/claim",
+        headers=alice_headers,
+    )
+    assert claim_resp.status_code == 200, claim_resp.text
+    claimed = claim_resp.json()["result"]
+    lease_id = claimed["lease_id"]
+    assert claimed["task_id"] == task_id
+    assert claimed["status"] == "running"
+    assert claimed["attempt"] == 1
+    assert claimed["claimed_by_user_id"] == "alice"
+    assert queue.pending == []
+    assert set(queue.processing) == {"msg_1"}
+
+    no_more_work = await client.post(
+        "/api/v1/task-queues/compile/claim",
+        headers=other_headers,
+    )
+    assert no_more_work.status_code == 200
+    assert no_more_work.json()["result"] is None
+
+    update_resp = await client.patch(
+        f"/api/v1/task-queues/compile/tasks/{task_id}",
+        json={
+            "lease_id": lease_id,
+            "stage": "generating",
+            "progress": 0.4,
+            "message": "Generating pages",
+            "details": {"pages": 3},
+        },
+        headers=alice_headers,
+    )
+    assert update_resp.status_code == 200, update_resp.text
+    updated = update_resp.json()["result"]
+    assert updated["stage"] == "generating"
+    assert updated["progress"] == 0.4
+    assert updated["details"] == {"pages": 3}
+
+    wrong_lease = await client.patch(
+        f"/api/v1/task-queues/compile/tasks/{task_id}",
+        json={"lease_id": "lease_wrong", "progress": 0.6},
+        headers=alice_headers,
+    )
+    assert wrong_lease.status_code == 409
+
+    complete_resp = await client.post(
+        f"/api/v1/task-queues/compile/tasks/{task_id}/complete",
+        json={
+            "lease_id": lease_id,
+            "result": {
+                "from": ["viking://resources/project"],
+                "to": "viking://resources/wiki",
+                "skill": "viking://user/default/skills/wiki",
+                "created": ["viking://resources/wiki/intro.md"],
+                "updated": [],
+                "unchanged": [],
+                "page_count": 1,
+                "link_count": 0,
+                "warnings": [],
+            },
+        },
+        headers=alice_headers,
+    )
+    assert complete_resp.status_code == 200, complete_resp.text
+    completed = complete_resp.json()["result"]
+    assert completed["status"] == "completed"
+    assert completed["stage"] == "completed"
+    assert completed["progress"] == 1.0
+    assert completed["result"]["created"] == ["viking://resources/wiki/intro.md"]
+    assert set(queue.processing) == {"msg_1"}
+    assert queue.acked == []
+
+    ack_resp = await client.post(
+        f"/api/v1/task-queues/compile/tasks/{task_id}/ack",
+        json={"lease_id": lease_id},
+        headers=alice_headers,
+    )
+    assert ack_resp.status_code == 200, ack_resp.text
+    acked = ack_resp.json()["result"]
+    assert acked["ack_by"] == "alice"
+    assert acked["acknowledged_at"] is not None
+    assert queue.processing == {}
+    assert queue.acked == ["msg_1"]
+
+    get_resp = await client.get(
+        f"/api/v1/task-queues/compile/tasks/{task_id}",
+        headers=alice_headers,
+    )
+    assert get_resp.status_code == 200
+    visible = get_resp.json()["result"]
+    assert visible["status"] == "completed"
+    assert visible["ack_by"] == "alice"
+    assert visible["result"]["page_count"] == 1
+    assert "lease_id" not in visible
+    assert "queue_name" not in visible
+    assert "queue_message_id" not in visible
+
+
+async def test_compile_open_task_queue_recovered_expired_lease_can_be_claimed_again(
+    service,
+    monkeypatch,
+):
+    queue_service, queues = _install_fake_open_task_queue(
+        monkeypatch,
+        service,
+        lease_seconds=-1.0,
+    )
+    created = await queue_service.create_compile_task(
+        account_id="lease-acct",
+        user_id="alice",
+        payload=_compile_open_task_request(),
+    )
+    queue = queues["OpenCompileTask"]
+    first_claim = await queue_service.claim_compile_task(account_id="lease-acct", user_id="alice")
+
+    assert first_claim is not None
+    assert first_claim.lease_id is not None
+    with pytest.raises(ConflictError):
+        await queue_service.update_task(
+            account_id="lease-acct",
+            user_id="alice",
+            task_id=created.task_id,
+            lease_id=first_claim.lease_id,
+            updates={"progress": 0.2},
+        )
+
+    queue.recover_processing()
+    second_claim = await queue_service.claim_compile_task(account_id="lease-acct", user_id="bob")
+
+    assert second_claim is not None
+    assert second_claim.task_id == created.task_id
+    assert second_claim.attempt == 2
+    assert second_claim.claimed_by_user_id == "bob"
+    assert second_claim.lease_id != first_claim.lease_id
