@@ -90,7 +90,7 @@ async function main() {
       });
     });
     outputContext(
-      profile ? `🦞 OV · index\n<openviking-context source="session-start">\n${profile}\n</openviking-context>` : "",
+      profile ? `☰ OV · index\n<openviking-context source="session-start">\n${profile}\n</openviking-context>` : "",
       "SessionStart",
     );
     return;

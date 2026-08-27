@@ -343,7 +343,7 @@ async function buildFallbackInjectionBlock(fetchJSON, items, cfg, actorPeerId = 
   let budgetRemaining = Math.max(200, Number(cfg.recallTokenBudget || 2000));
   const lines = [
     "<openviking-context>",
-    `🦞 OV · recall ×${items.length}`,
+    `✧ OV · recall ×${items.length}`,
     "Relevant context from OpenViking. Use the read MCP tool to expand URIs.",
   ];
   let contentCount = 0;
@@ -424,10 +424,11 @@ function looksLikeUnknownField(res) {
 }
 
 function wrapContext(body) {
-  const n = (body.match(/\[[^\]]*%\]/g) || []).length;
+  const n = (body.match(/<memory\b/g) || []).length
+    || (body.match(/\[[^\]]*%\]/g) || []).length;
   return [
     "<openviking-context>",
-    "🦞 OV · recall ×" + n,
+    "✧ OV · recall ×" + n,
     "Relevant memory from OpenViking. Use the search/read MCP tools to expand URIs.",
     body,
     "</openviking-context>",
