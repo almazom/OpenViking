@@ -189,7 +189,13 @@ The profile's `cordis.patch.yml` can also carry plugin config:
     skipSubagentSessions: true
     commitTokenThreshold: 20000
     mcpToolCallTimeoutMs: 60000
+    boundaryNotice: false
 ```
+
+`boundaryNotice` (or `OPENVIKING_BOUNDARY_NOTICE=1`) opts into the boundary
+notice: a plugin-sourced `user/message` appended after `compaction/end` when a
+compaction-boundary commit archived messages. It defaults to `false`, and with
+the default the plugin never appends anything around compaction.
 
 Recall normally uses `POST /api/v1/search/search` with `mode: "context"`.
 `recallMaxTokens` (`OPENVIKING_RECALL_MAX_TOKENS`) sets this request's
@@ -221,7 +227,7 @@ The older size settings apply to fallback recall, not the primary context reques
 - `agent/pre-step` retrieves with the current step input and appends a durable plugin message to that same step.
 - `session/event` captures user, assistant, and optionally tool-result messages without scraping a transcript.
 - `turn/end` checks the OpenViking pending-token threshold and commits when required.
-- `compaction/start` (DSH appends it before rewriting the transcript) commits unconditionally, the same boundary the Claude Code integration covers with its PreCompact hook, so messages below the threshold stay recallable after compaction. A successful flush also appends a plugin-sourced `user/message` notice (marker `OpenViking boundary commit`) that client-side visualization can decorate; the pending-queue path, skipped commits, and failed metadata reads stay silent.
+- `compaction/start` (DSH appends it before rewriting the transcript) commits unconditionally, the same boundary the Claude Code integration covers with its PreCompact hook, so messages below the threshold stay recallable after compaction. With `boundaryNotice: true` (default off), a successful flush also appends a plugin-sourced `user/message` notice (marker `OpenViking boundary commit`) after `compaction/end` — never inside the compaction window — that client-side visualization can decorate; the pending-queue path, skipped commits, and failed metadata reads stay silent. Permanent boundary-commit failures and failed notice appends warn once per session.
 - `skipSubagentSessions: true` excludes sessions marked with `header.origin: subagent` from automatic profile, recall, capture, and commit; it defaults to `false`.
 - `syncTurns: false` stops every new write: no captured messages, no threshold, compaction-boundary, or shutdown commit. Writes queued while the toggle was on are still replayed by the background drainer once the server recovers — they were captured with the toggle on. Profile injection and recall are unaffected; it defaults to `true`.
 - `skillCatalog` (default `true`) and `skillCatalogTokenBudget` (default `1200`; `0` also turns the catalog off) govern `<available-skills>`. The catalog comes from one `GET /api/v1/skills?node_limit=200` call: the user's own skills first, then those shared under `viking://agent/skills` minus any whose name the user also owns, each description cut to about 40 tokens. Its budget is separate from `profileTokenBudget`. When the descriptions do not fit, the catalog lists names only (with a `... +N more` tail if even the names do not all fit); when not even one name fits, it shrinks to a one-line count; with no skills, or a server without the endpoint, it is omitted.
