@@ -204,7 +204,7 @@ test("a compaction boundary appends a notice event on successful flush", async (
     async commitSession() {
       return { ok: true, result: { trace_id: "compaction" } };
     },
-  }, config(), { debug() {} });
+  }, config({ boundaryNotice: true }), { debug() {} });
   const session = {
     id: "compaction-notice",
     header: { cwd: "/workspace" },
@@ -241,7 +241,7 @@ test("a pending boundary notice does not append inside the compaction bracket", 
     async commitSession() {
       return { ok: true, result: { trace_id: "compaction" } };
     },
-  }, config(), { debug() {} });
+  }, config({ boundaryNotice: true }), { debug() {} });
   const session = {
     id: "compaction-bracket",
     header: { cwd: "/workspace" },
@@ -291,6 +291,76 @@ test("a boundary commit with nothing pending stays silent", async () => {
   await runtime.flush(session);
 
   assert.equal(appends.length, 0);
+});
+
+test("the default configuration never emits a boundary notice", async () => {
+  const appends = [];
+  const runtime = new OpenVikingRuntime({
+    async getSession() {
+      return { pending_tokens: 25 };
+    },
+    async commitSession() {
+      return { ok: true, result: { trace_id: "compaction" } };
+    },
+  }, config(), { debug() {} });
+  const session = {
+    id: "compaction-default-off",
+    header: { cwd: "/workspace" },
+    append(type, data) {
+      appends.push({ type, data });
+    },
+  };
+  runtime.stateFor(session).ready = true;
+
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  await runtime.flush(session);
+
+  assert.equal(appends.length, 0,
+    "boundaryNotice defaults to false: the plugin appends nothing around compaction unless the operator opts in");
+});
+
+test("a permanent boundary commit failure warns once and a success re-arms the warning", async () => {
+  const pendingDir = await mkdtemp(join(tmpdir(), "dsh-memory-compact-warn-"));
+  tempDirs.push(pendingDir);
+  process.env.OPENVIKING_PENDING_DIR = pendingDir;
+  const warnLines = [];
+  let fail = true;
+  const runtime = new OpenVikingRuntime({
+    async getSession() {
+      return { pending_tokens: 25 };
+    },
+    async commitSession() {
+      return fail
+        ? { ok: false, status: 400, error: { code: "FAILED", message: "private detail" } }
+        : { ok: true, result: { trace_id: "compaction" } };
+    },
+  }, config(), { debug() {}, warn: line => warnLines.push(line) });
+  const session = { id: "compaction-warn", header: { cwd: "/workspace" } };
+  runtime.stateFor(session).ready = true;
+
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+
+  const stageWarns = warnLines.filter(line => line.includes("compaction_commit"));
+  assert.equal(stageWarns.length, 1, "repeated permanent failures warn once per session");
+  assert.match(stageWarns[0], /"status":400/);
+  assert.match(stageWarns[0], /"code":"FAILED"/);
+  assert.equal(stageWarns[0].includes("private detail"), false,
+    "warnings carry a bounded status/code token, never the error payload");
+
+  fail = false;
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+  fail = true;
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+
+  assert.equal(warnLines.filter(line => line.includes("compaction_commit")).length, 2,
+    "a successful boundary commit re-arms the warning for the next failure");
 });
 
 test("a failed metadata read still commits and stays silent", async () => {
@@ -350,6 +420,7 @@ test("capture skips this plugin's own session messages", async () => {
 
 test("a failing notice append never breaks the committed boundary flush", async () => {
   const debugLines = [];
+  const warnLines = [];
   const appends = [];
   const runtime = new OpenVikingRuntime({
     async getSession() {
@@ -358,7 +429,10 @@ test("a failing notice append never breaks the committed boundary flush", async 
     async commitSession() {
       return { ok: true, result: { trace_id: "compaction" } };
     },
-  }, config(), { debug: line => debugLines.push(line) });
+  }, config({ boundaryNotice: true }), {
+    debug: line => debugLines.push(line),
+    warn: line => warnLines.push(line),
+  });
   const session = {
     id: "compaction-notice-fail",
     header: { cwd: "/workspace" },
@@ -378,6 +452,8 @@ test("a failing notice append never breaks the committed boundary flush", async 
     "the notice failure is logged as boundary_notice_error, not surfaced as write_error");
   assert.equal(debugLines.some(line => line.includes("write_error")), false,
     "the write chain must survive a notice append failure");
+  assert.equal(warnLines.filter(line => line.includes("boundary_notice")).length, 1,
+    "a notice failure warns once per session so a failed boundary is not debug-silent");
 });
 
 test("a retryable boundary failure queues the commit and emits no notice", async () => {
@@ -420,7 +496,7 @@ test("the notice text starts with the pinned cross-repo marker constant", async 
     async commitSession() {
       return { ok: true, result: { trace_id: "compaction" } };
     },
-  }, config(), { debug() {} });
+  }, config({ boundaryNotice: true }), { debug() {} });
   const session = {
     id: "compaction-marker-binding",
     header: { cwd: "/workspace" },
@@ -883,7 +959,7 @@ test("the per-session peer honors peerSource", async () => {
   assert.equal(byCwd.peerId, deriveWorkspacePeerId(root));
 });
 
-function config() {
+function config(overrides = {}) {
   return {
     explicitPeerId: "",
     workspacePeer: false,
@@ -895,6 +971,8 @@ function config() {
     captureMaxLength: 24000,
     captureMode: "semantic",
     commitKeepRecentCount: 10,
+    boundaryNotice: false,
+    ...overrides,
   };
 }
 
