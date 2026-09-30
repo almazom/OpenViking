@@ -216,6 +216,8 @@ test("a compaction boundary appends a notice event on successful flush", async (
 
   runtime.maybeCommit(session, { type: "compaction/start" });
   await runtime.flush(session);
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  await runtime.flush(session);
 
   assert.equal(appends.length, 1);
   assert.equal(appends[0].type, "user/message");
@@ -228,6 +230,42 @@ test("a compaction boundary appends a notice event on successful flush", async (
   assert.match(appends[0].data.content[0].text, /OpenViking boundary commit: 25 pending token/);
   assert.equal(appends[0].data.source.summary, appends[0].data.content[0].text,
     "the collapsed-row summary must repeat the notice sentence verbatim (dsh notice-summary + ov-viz contract)");
+});
+
+test("a pending boundary notice does not append inside the compaction bracket", async () => {
+  const appends = [];
+  const runtime = new OpenVikingRuntime({
+    async getSession() {
+      return { pending_tokens: 25 };
+    },
+    async commitSession() {
+      return { ok: true, result: { trace_id: "compaction" } };
+    },
+  }, config(), { debug() {} });
+  const session = {
+    id: "compaction-bracket",
+    header: { cwd: "/workspace" },
+    append(type, data) {
+      appends.push({ type, data });
+    },
+  };
+  runtime.stateFor(session).ready = true;
+
+  // Inside the bracket: commit ran, but the surface must stay untouched so
+  // the compaction surface guard's deep-strict comparison holds.
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+  assert.equal(appends.length, 0,
+    "the boundary notice must not land between compaction/start and compaction/end");
+
+  // After the bracket the queued notice flushes exactly once.
+  runtime.maybeCommit(session, { type: "compaction/end", data: { error: "compaction: session surface changed during summarization" } });
+  await runtime.flush(session);
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  await runtime.flush(session);
+  assert.equal(appends.length, 1,
+    "the queued notice flushes once on the first compaction/end");
+  assert.equal(appends[0].type, "user/message");
 });
 
 test("a boundary commit with nothing pending stays silent", async () => {
@@ -332,6 +370,8 @@ test("a failing notice append never breaks the committed boundary flush", async 
 
   runtime.maybeCommit(session, { type: "compaction/start" });
   await runtime.flush(session);
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  await runtime.flush(session);
 
   assert.equal(appends.length, 0);
   assert.equal(debugLines.some(line => line.includes("boundary_notice_error")), true,
@@ -391,6 +431,8 @@ test("the notice text starts with the pinned cross-repo marker constant", async 
   runtime.stateFor(session).ready = true;
 
   runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+  runtime.maybeCommit(session, { type: "compaction/end" });
   await runtime.flush(session);
 
   assert.equal(appends.length, 1);

@@ -58,6 +58,7 @@ export class OpenVikingRuntime {
       initializationRetryable: false,
       hasPendingWrites: false,
       pendingCreatedAt: 0,
+      pendingBoundaryNotice: 0,
       disposing: null,
     };
     this.states.set(session.id, state);
@@ -196,6 +197,10 @@ export class OpenVikingRuntime {
       this.commitAtCompactionBoundary(session);
       return;
     }
+    if (event.type === "compaction/end") {
+      this.flushBoundaryNotice(session);
+      return;
+    }
     if (event.type !== "turn/end") return;
     const state = this.stateFor(session);
     if (!isCaptureEnabled(state.config)) return;
@@ -274,8 +279,27 @@ export class OpenVikingRuntime {
         await this.enqueueFinalCommit(state, commitPayload);
       }
       if (response.ok && pendingTokens > 0 && response.result?.status !== "skipped") {
-        this.appendBoundaryNotice(session, pendingTokens);
+        // The notice is queued, not appended here: an append between
+        // compaction/start and compaction/end changes the session surface
+        // during summarization and the compaction surface guard disqualifies
+        // the bracket. flushBoundaryNotice appends it after compaction/end.
+        state.pendingBoundaryNotice = pendingTokens;
       }
+    });
+  }
+
+  // Flush a boundary notice queued at compaction/start. The commit itself is
+  // already durable by then, so PT-002 provenance is unchanged; only the UI
+  // notice moves past the compaction bracket. The queued token count stays
+  // truthful on a failed compaction too, so the flush runs on every
+  // compaction/end.
+  flushBoundaryNotice(session) {
+    const state = this.stateFor(session);
+    const pendingTokens = state.pendingBoundaryNotice;
+    if (!pendingTokens) return;
+    state.pendingBoundaryNotice = 0;
+    this.enqueueWrite(state, async () => {
+      await this.appendBoundaryNotice(session, pendingTokens);
     });
   }
 
@@ -319,6 +343,9 @@ export class OpenVikingRuntime {
           await this.enqueueFinalCommit(state, commitPayload);
           return;
         }
+        // Safety net: a session disposed between compaction/start and
+        // compaction/end still delivers its queued notice.
+        this.flushBoundaryNotice(session);
         if (!state.ready && !(await this.ensureState(state)).ready) return;
         const response = await this.client.commitSession(
           state.ovSessionId,
