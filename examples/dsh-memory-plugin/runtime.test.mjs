@@ -268,6 +268,113 @@ test("a pending boundary notice does not append inside the compaction bracket", 
   assert.equal(appends[0].type, "user/message");
 });
 
+test("the queued notice survives compaction/end racing an unfinished boundary commit", async () => {
+  const appends = [];
+  let releaseCommit;
+  const gate = new Promise(resolve => { releaseCommit = resolve; });
+  const runtime = new OpenVikingRuntime({
+    async getSession() {
+      return { pending_tokens: 25 };
+    },
+    async commitSession() {
+      await gate;
+      return { ok: true, result: { trace_id: "compaction" } };
+    },
+  }, config({ boundaryNotice: true }), { debug() {} });
+  const session = {
+    id: "compaction-race",
+    header: { cwd: "/workspace" },
+    append(type, data) {
+      appends.push({ type, data });
+    },
+  };
+  runtime.stateFor(session).ready = true;
+
+  // compaction/end is delivered while the boundary commit is still in flight:
+  // the flush must read the queued count inside the write chain, not at event
+  // time.
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  assert.equal(appends.length, 0);
+  releaseCommit();
+  await runtime.flush(session);
+
+  assert.equal(appends.length, 1,
+    "the notice flushes after the commit op completes, not at compaction/end event time");
+  assert.match(appends[0].data.content[0].text, /OpenViking boundary commit: 25 pending token/);
+});
+
+test("a reopened compaction bracket holds the queued notice instead of appending inside it", async () => {
+  const appends = [];
+  const runtime = new OpenVikingRuntime({
+    async getSession() {
+      return { pending_tokens: 25 };
+    },
+    async commitSession() {
+      return { ok: true, result: { trace_id: "compaction" } };
+    },
+  }, config({ boundaryNotice: true }), { debug() {} });
+  const session = {
+    id: "compaction-reopen",
+    header: { cwd: "/workspace" },
+    append(type, data) {
+      appends.push({ type, data });
+    },
+  };
+  runtime.stateFor(session).ready = true;
+
+  // Bracket A closes, but bracket B reopens before the flushed write chain
+  // runs: the notice must wait for B's end rather than append into B.
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  runtime.maybeCommit(session, { type: "compaction/start" });
+  await runtime.flush(session);
+  assert.equal(appends.length, 0, "no append while a compaction bracket is open");
+
+  runtime.maybeCommit(session, { type: "compaction/end" });
+  await runtime.flush(session);
+  assert.equal(appends.length, 1, "the held notice flushes on the next compaction/end");
+});
+
+test("a successful notice append re-arms the boundary_notice warning", async () => {
+  const warnLines = [];
+  let fail = true;
+  const runtime = new OpenVikingRuntime({
+    async getSession() {
+      return { pending_tokens: 25 };
+    },
+    async commitSession() {
+      return { ok: true, result: { trace_id: "compaction" } };
+    },
+  }, config({ boundaryNotice: true }), {
+    debug() {},
+    warn: line => warnLines.push(line),
+  });
+  const session = {
+    id: "compaction-notice-rearm",
+    header: { cwd: "/workspace" },
+    append() {
+      if (fail) throw new Error("host append failed");
+    },
+  };
+  runtime.stateFor(session).ready = true;
+
+  const bracket = async () => {
+    runtime.maybeCommit(session, { type: "compaction/start" });
+    runtime.maybeCommit(session, { type: "compaction/end" });
+    await runtime.flush(session);
+  };
+  await bracket();
+  await bracket();
+  fail = false;
+  await bracket();
+  fail = true;
+  await bracket();
+
+  assert.equal(warnLines.filter(line => line.includes("boundary_notice")).length, 2,
+    "failure, suppressed repeat, then a success re-arms the warning for the next failure");
+});
+
 test("a boundary commit with nothing pending stays silent", async () => {
   const appends = [];
   const runtime = new OpenVikingRuntime({

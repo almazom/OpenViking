@@ -59,6 +59,7 @@ export class OpenVikingRuntime {
       hasPendingWrites: false,
       pendingCreatedAt: 0,
       pendingBoundaryNotice: 0,
+      compactionOpen: false,
       warnedFailures: new Set(),
       disposing: null,
     };
@@ -195,10 +196,12 @@ export class OpenVikingRuntime {
 
   maybeCommit(session, event) {
     if (event.type === "compaction/start") {
+      this.stateFor(session).compactionOpen = true;
       this.commitAtCompactionBoundary(session);
       return;
     }
     if (event.type === "compaction/end") {
+      this.stateFor(session).compactionOpen = false;
       this.flushBoundaryNotice(session);
       return;
     }
@@ -305,13 +308,21 @@ export class OpenVikingRuntime {
   // notice moves past the compaction bracket. The queued token count stays
   // truthful on a failed compaction too, so the flush runs on every
   // compaction/end. The notice is opt-in (boundaryNotice, default off): with
-  // the flag unset the queue clears without any append.
+  // the flag unset the queue clears without any append. The read-and-clear
+  // runs inside the write chain because the commit that queues the notice is
+  // itself a chained operation: reading at event time can precede the commit
+  // and miss the queued count (slow server, backed-up chain). A bracket that
+  // reopened before the flush runs keeps the notice queued for the next
+  // compaction/end — the notice is decoration and must never append inside a
+  // live bracket, even when the chain is backlogged.
   flushBoundaryNotice(session) {
     const state = this.stateFor(session);
-    const pendingTokens = state.pendingBoundaryNotice;
-    state.pendingBoundaryNotice = 0;
-    if (!pendingTokens || !state.config.boundaryNotice) return;
     this.enqueueWrite(state, async () => {
+      if (state.compactionOpen || !state.config.boundaryNotice) return;
+      if (typeof session.append !== "function") return;
+      const pendingTokens = state.pendingBoundaryNotice;
+      if (!pendingTokens) return;
+      state.pendingBoundaryNotice = 0;
       await this.appendBoundaryNotice(session, pendingTokens);
     });
   }
@@ -369,8 +380,10 @@ export class OpenVikingRuntime {
           await this.enqueueFinalCommit(state, commitPayload);
           return;
         }
-        // Safety net: a session disposed between compaction/start and
-        // compaction/end still delivers its queued notice.
+        // Best-effort safety net: dispose between compaction/start and
+        // compaction/end re-runs the flush; the notice still lands only when
+        // the bracket has closed and the real session (not a disposeAll id
+        // stub) is available to append.
         this.flushBoundaryNotice(session);
         if (!state.ready && !(await this.ensureState(state)).ready) return;
         const response = await this.client.commitSession(
