@@ -1,8 +1,7 @@
 import { buildPluginConfig } from "./shared/plugin-config.mjs";
 import { loadCredentialFiles } from "./shared/credentials.mjs";
 
-export const PLUGIN_VERSION = "0.5.12";
-
+export const PLUGIN_VERSION = "0.5.14";
 /**
  * Namespace for the bridged OpenViking MCP tools. DSH publishes every MCP tool
  * as `mcp__<serverName>__<rawName>`, so this string is part of the

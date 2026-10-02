@@ -11,11 +11,9 @@ const sectionNames: Record<string, string> = {
   guides: 'Guides',
   'agent-integrations': 'Agent Integrations',
   'context-compilation': 'Context Compilation',
-  migration: 'Migration',
   api: 'API Reference',
   faq: 'FAQ',
-  about: 'About',
-  design: 'Design Notes'
+  about: 'About'
 }
 
 const zhSectionNames: Record<string, string> = {
@@ -25,11 +23,9 @@ const zhSectionNames: Record<string, string> = {
   guides: '指南',
   'agent-integrations': 'Agent 集成',
   'context-compilation': '上下文编译',
-  migration: '迁移指南',
   api: 'API 参考',
   faq: '常见问题',
-  about: '关于',
-  design: '设计文档'
+  about: '关于'
 }
 
 export function titleFromMarkdown(filePath: string): string {
@@ -343,8 +339,8 @@ const conceptsSidebar = {
           ['11-multi-tenant.md', '多租户'],
           ['12-metrics.md', '监控指标'],
           ['13-privacy.md', '隐私配置'],
-          ['14-multi-write-storage.md', '多写存储'],
-          ['16-queue-lifecycle.md', '队列状态与完成语义']
+          ['14-multi-write-storage.md', '主备存储'],
+          ['16-queue-lifecycle.md', '任务状态']
         ]
       },
       {
@@ -436,7 +432,7 @@ const guidesSidebar = {
       {
         text: '存储与性能',
         items: [
-          ['13-multi-write-storage.md', '多写存储'],
+          ['13-multi-write-storage.md', '主备存储'],
           ['14-ragfs-cache.md', 'RAGFS 缓存'],
           ['15-snapshot.md', '快照管理'],
           ['16-cuvs.md', 'cuVS 向量检索']
@@ -614,30 +610,12 @@ function guidesSection(
   return section
 }
 
-function migrationSection(
-  locale: 'en' | 'zh',
-  title: string,
-  collapsed = true
-): DefaultTheme.SidebarItem {
-  return {
-    text: title,
-    collapsed,
-    items: [
-      {
-        text: '0.3.x → 0.4.0',
-        link: linkFor(path.join(docsRoot, locale, 'migration', '01-user-peer-model.md'))
-      }
-    ]
-  }
-}
-
 type LocalizedSidebarSection =
   | 'getting-started'
   | 'configuration'
   | 'concepts'
   | 'guides'
   | 'agent-integrations'
-  | 'migration'
 
 type LocalizedSidebarSectionBuilder = (
   locale: 'en' | 'zh',
@@ -654,8 +632,7 @@ const localizedSidebarSectionBuilders: Record<
     sidebarSection(`${locale}/configuration`, title, collapsed),
   concepts: conceptsSection,
   guides: guidesSection,
-  'agent-integrations': agentIntegrationSection,
-  migration: migrationSection
+  'agent-integrations': agentIntegrationSection
 }
 
 function localizedSidebarSection(
@@ -696,18 +673,13 @@ export function localizedAboutSidebarItems(locale: 'en' | 'zh'): DefaultTheme.Si
   return [sidebarSection(`${locale}/about`, labels.about, false)]
 }
 
-export const designSidebar: DefaultTheme.SidebarItem[] = [
-  sidebarSection('design', sectionNames.design, false)
-]
-
-
 // The homepage map uses the same entries, labels and order as article sidebars.
 export function documentationSections(locale: 'en' | 'zh') {
   const labels = locale === 'zh' ? zhSectionNames : sectionNames
   return [
     ...localizedGroupedSidebarItems(locale, ['getting-started', 'configuration', 'agent-integrations']),
     ...localizedSectionSidebarItems(locale, 'concepts'),
-    ...localizedGroupedSidebarItems(locale, ['guides', 'migration']),
+    ...localizedGroupedSidebarItems(locale, ['guides']),
     ...localizedReferenceSidebarItems(locale),
     sidebarSection(`${locale}/faq`, labels.faq, false),
     ...localizedAboutSidebarItems(locale)
