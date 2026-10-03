@@ -69,7 +69,7 @@ test("live compaction boundary commits pending messages to a real server", { ski
   await runtime.flush(session);
 
   const commit = wire.find(([kind]) => kind === "commitSession")?.[1];
-  assert.ok(commit, "the boundary must issue exactly one commitSession");
+  assert.ok(commit, "the boundary must issue a commitSession");
   assert.equal(commit.ok, true, `commitSession must succeed (${JSON.stringify(commit.error ?? {})})`);
   assert.equal(commit.result.status, "accepted", `commit must be accepted, got ${commit.result.status}`);
   assert.ok(commit.result.task_id, "accepted commit must carry a task id");
