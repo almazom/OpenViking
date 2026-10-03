@@ -10,10 +10,13 @@ import { listPending } from "./shared/pending-queue.mjs";
 import { deriveHarnessSessionId } from "./shared/session-model.mjs";
 import { OpenVikingRuntime } from "./runtime.mjs";
 
-// Runtime-to-real-server boundary gate (plugin runtime directly, not the DSH host): proves the exact property the scoped
-// suite cannot — that a `compaction/start` on the live event feed commits the
-// captured-but-uncommitted messages to a real OpenViking server, before the
-// host rewrites the compacted range. Mirrors the live-recall gate: opt-in via
+// Runtime-to-real-server boundary gate (plugin runtime directly, not the DSH host):
+// proves the property the scoped suite cannot — that a `compaction/start` on the
+// live event feed makes the plugin issue its unconditional commit against a real
+// OpenViking server, before the host rewrites the compacted range. The server's
+// acceptance is asserted (task id + archive uri); the archive itself and the
+// settlement count are server-side and polled as a closing log line. Mirrors the
+// live-recall gate: opt-in via
 // OPENVIKING_E2E=1 plus the usual credential chain (OPENVIKING_* env /
 // ovcli.conf), skipped otherwise — including in repo CI until a server secret
 // is configured there.
@@ -64,6 +67,11 @@ test("live compaction boundary commits pending messages to a real server", { ski
   assert.equal(adds.length, 3, "every staged message must reach the server");
   for (const r of adds) assert.equal(r.ok, true, `addMessage must succeed (${JSON.stringify(r.error ?? {})})`);
   assert.ok(adds.at(-1).result.pending_tokens > 0, "messages must sit server-side as pending tokens before the boundary");
+
+  // Nothing may have committed before the boundary: below the threshold, with no
+  // turn/end and no teardown, the boundary is the only possible trigger.
+  assert.equal(wire.filter(([kind]) => kind === "commitSession").length, 0,
+    "no commit may fire before the compaction boundary");
 
   // The boundary. In the harness this event is appended by compaction-basic
   // before summarization; here it is fed directly, deterministically.

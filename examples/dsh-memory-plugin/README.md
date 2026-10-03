@@ -290,7 +290,7 @@ old skill packages to an rc.2 profile; removing those direct dependencies and
 reinstalling the bundle restored the same integration checks. A clean rc.2
 profile with the published `0.3.0` bundle did not reproduce that import error.
 
-`live-recall.test.mjs` is an opt-in end-to-end gate against a real OpenViking
+`live-recall.test.mjs` is an opt-in live-backend gate against a real OpenViking
 server: it stores a sentinel memory through a session commit, waits for
 extraction, and asserts recall returns that sentinel — the property no stub
 can certify. Enable it with `OPENVIKING_E2E=1` plus the normal credential
