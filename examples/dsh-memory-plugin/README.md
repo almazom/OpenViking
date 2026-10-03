@@ -310,5 +310,5 @@ durable `compaction/start` event the way `compaction-basic` appends it before
 summarization, and asserts the boundary commit — `commitSession` accepted with a
 task id and archive uri, no local retry-queue residue. The server-side
 settlement (`commit_count`) is polled and logged as a closing confirmation;
-the accepted task id is the hard evidence. Credentials resolve through the usual chain
+the accepted task is the strongest signal this in-process gate can observe; the archival itself happens server-side. Credentials resolve through the usual chain
 (`OPENVIKING_*` env / `ovcli.conf`).

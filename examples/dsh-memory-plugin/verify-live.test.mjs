@@ -22,7 +22,7 @@ import { OpenVikingRuntime } from "./runtime.mjs";
 // is configured there.
 const enabled = process.env.OPENVIKING_E2E === "1";
 
-test("live compaction boundary commits pending messages to a real server", { skip: !enabled, timeout: 300_000 }, async () => {
+test("live compaction boundary requests the commit against a real server", { skip: !enabled, timeout: 300_000 }, async () => {
   // keepRecentCount 0: with the default (10) the committed session keeps its
   // whole tail verbatim and extraction has nothing to mine — same rationale as
   // the live-recall gate.
