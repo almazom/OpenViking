@@ -295,3 +295,19 @@ server: it stores a sentinel memory through a session commit, waits for
 extraction, and asserts recall returns that sentinel — the property no stub
 can certify. Enable it with `OPENVIKING_E2E=1` plus the normal credential
 chain; it skips otherwise (including in CI until a server secret exists).
+
+## Live verification
+
+Two opt-in gates run against a real OpenViking server (skipped otherwise, including in CI):
+
+```bash
+OPENVIKING_E2E=1 node --test live-recall.test.mjs verify-live.test.mjs
+```
+
+`verify-live.test.mjs` proves the compaction boundary end to end: it stages user
+messages as server-side pending tokens (no threshold is reached), feeds the
+durable `compaction/start` event the way `compaction-basic` appends it before
+summarization, and asserts the boundary commit — `commitSession` accepted with a
+task id and archive uri, `pending_tokens` drained to `commit_count ≥ 1`, no
+local retry-queue residue. Credentials resolve through the usual chain
+(`OPENVIKING_*` env / `ovcli.conf`).
