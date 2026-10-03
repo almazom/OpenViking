@@ -11,8 +11,9 @@ import { deriveHarnessSessionId } from "./shared/session-model.mjs";
 import { OpenVikingRuntime } from "./runtime.mjs";
 
 // Runtime-to-real-server boundary gate (plugin runtime directly, not the DSH host):
-// proves the property the scoped suite cannot — that a `compaction/start` on the
-// live event feed makes the plugin issue its unconditional commit against a real
+// proves the property the scoped suite cannot — that a `compaction/start` (fed to the
+// runtime the way the host's session/event subscription forwards it) makes the plugin
+// issue its unconditional commit against a real
 // OpenViking server, before the host rewrites the compacted range. The server's
 // acceptance is asserted (task id + archive uri); the archive itself and the
 // settlement count are server-side and polled as a closing log line. Mirrors the
