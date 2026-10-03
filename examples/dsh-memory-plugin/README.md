@@ -304,7 +304,7 @@ Two opt-in gates run against a real OpenViking server (skipped otherwise, includ
 OPENVIKING_E2E=1 node --test live-recall.test.mjs verify-live.test.mjs
 ```
 
-`verify-live.test.mjs` proves the compaction boundary end to end: it stages user
+`verify-live.test.mjs` proves the runtime-to-server compaction boundary: it stages user
 messages as server-side pending tokens (no threshold is reached), feeds the
 durable `compaction/start` event the way `compaction-basic` appends it before
 summarization, and asserts the boundary commit — `commitSession` accepted with a

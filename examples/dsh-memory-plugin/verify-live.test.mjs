@@ -10,7 +10,7 @@ import { listPending } from "./shared/pending-queue.mjs";
 import { deriveHarnessSessionId } from "./shared/session-model.mjs";
 import { OpenVikingRuntime } from "./runtime.mjs";
 
-// Real-backend compaction-boundary gate: proves the exact property the scoped
+// Runtime-to-real-server boundary gate (plugin runtime directly, not the DSH host): proves the exact property the scoped
 // suite cannot — that a `compaction/start` on the live event feed commits the
 // captured-but-uncommitted messages to a real OpenViking server, before the
 // host rewrites the compacted range. Mirrors the live-recall gate: opt-in via
@@ -23,6 +23,8 @@ test("live compaction boundary commits pending messages to a real server", { ski
   // keepRecentCount 0: with the default (10) the committed session keeps its
   // whole tail verbatim and extraction has nothing to mine — same rationale as
   // the live-recall gate.
+  // Isolate the pending queue from other harnesses sharing ~/.openviking/pending.
+  process.env.OPENVIKING_PENDING_DIR = mkdtempSync(join(tmpdir(), 'live-verify-pending-'));
   const config = resolveConfig({ workspacePeer: false, commitKeepRecentCount: 0 });
   const real = new OpenVikingClient(config);
   assert.equal((await real.healthResult()).ok, true, "OpenViking server must be reachable");
